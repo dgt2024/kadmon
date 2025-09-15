@@ -1,0 +1,44 @@
+background
+kernel
+    desc
+    main
+    end
+	return
+	text
+	icon
+logo
+    init
+    end
+    render
+        border
+desktop
+    files
+    proc
+        skip
+mouse
+    poll
+    replace
+    skip
+    print
+        loop
+    end
+    init
+icon
+    print
+        raw
+        folder
+        loop
+    raw
+        init
+        end
+    folder
+        init
+        end
+text
+    char
+    nibble
+        skipadd
+        godown
+        row
+        skip
+    database
