@@ -4,18 +4,12 @@ kernel.bootloader:
 	mov ax, 0x4F02
 	mov bx, 0x4105
 	int 0x10
-	mov ax, 0x020C
+	mov ax, 0x020D
 	mov cx, 1
 	mov dl, 0x80
 	; this 0x80 means the disk 1, a.k.a. A:/
 	; it's now 0 bc a hdd controller is harder than the fdd
 	mov bx, 0x7C00
-	int 0x13
-	; app in userspace
-	mov ax, 0x0201
-	mov cx, 0x0D
-	mov dl, 0x80
-	mov bx, 0x1000
 	int 0x13
 	; todo: take desktop out of the HDD/floppy
 	cli
@@ -45,6 +39,7 @@ kernel.main:
 	mov fs, ax
 	mov gs, ax
 	mov ss, ax
+	mov esp, 0x9FC00
 	; here begginning code begins :)
 	mov ecx, 0xB7000
 	mov edi, 0xFD180000
@@ -101,7 +96,7 @@ logo.render.border:
 	; todo: read desktop
 	; now mousecursor
 	call kernel.drivers
-	mov esi, 0x1000
+	mov esi, hw
 	call kernel.load ; esi is address of file w/ header
 kernel.loop:
 	call mouse
@@ -197,12 +192,16 @@ mouse.poll:
 	; why not tho lol
 	; this is me 5 days later, I regret it
 	; the mouse worked, i didnt back up and it doesnt work anymlre
-	; the mouse had scroll lock... yea, scroll lock I didn't know that existed
+	ax
+	mov dword[0x504], eax
+; the mouse had scroll lock... yea, scroll lock I didn't know that existed
 	; it has been one month, i unregret it i might have finished now only one thing left
 	; the floppy disk controller, which is what i hate  
 times 510 - ($ - $$) db 0
 dw 0xAA55
 kernel.drivers:
+	pop edx
+	mov dword[0x508], edx
 	mov al, 0xA8
 	out 0x64, al
 	mov al, 0x20
@@ -239,7 +238,8 @@ kernel.drivers:
 	mov word[0x100000], 0xFD18
 	call desktop.update
 	mov byte[0x700000], 0xC3
-	ret
+	mov edx, dword[0x508]
+	jmp edx
 desktop:
 	mov esi, desktop.files
 	mov edi, 0xFD18080A
@@ -263,14 +263,14 @@ desktop.proc:
 	pop esi
 	pop edi
 	add edi, 0x67FB
-	mov bl, 0
+	mov bl, 0x0F
 	call text
 desktop.proc.skip:
 	ret
 desktop.update:
+	pop edx
+	mov dword[0x504], edx
 	mov esi, 0x100000
-	pop ebx
-	push ebx
 desktop.update.loop:
 	xor eax, eax
 	lodsw ; read 0xFD18 into ax
@@ -295,8 +295,8 @@ desktop.update.end:
 	mov esi, 0xFD0C0000
 	mov ecx, 0xC0000
 	rep movsb
-	push ebx
-	ret
+	mov edx, dword[0x504]
+	jmp edx
 desktop.update.space:
 	inc edi
 	jmp desktop.update.skip
@@ -428,35 +428,42 @@ kernel.mouse:
 	call eax
 kernel.load:
 	; esi is the address of the application with structure
+	pop eax
+	mov dword[0x500], eax
+	push esi
 	lodsb
 	and al, 00000011b
 	movzx eax, al
 	add esi, eax
+	times 2 inc esi
 kernel.load.find:
-	inc esi
 	lodsb
 	cmp al, 0
 	jne kernel.load.find
-	inc esi
 	lodsw
 	movzx ecx, ax
 	lodsw
 	movzx edx, ax
-	times 2 inc esi
 	mov edi, 0x200000
 	rep movsb
 	mov al, 0xC3
 	stosb
+	pop edi
+	push esi
+	mov esi, edi
+	lodsb
+	test al, 00000100b
+	jz kernel.skip
 	mov ecx, edx
 	mov edi, 0x700000
 	rep movsb
 	mov al, 0xC3
 	stosb
+kernel.skip:
+	pop esi
 	call 0x200000
-	mov al, 0
-	mov edi, 0x700000
-	rep stosb
-	ret
+	mov eax, dword[0x500]
+	jmp eax
 ; this comment below chose the structure of this whole proyect
 ; from here until whenever i want, textures
 logo.init: ; 1-color version of an .img
@@ -1211,10 +1218,18 @@ times 512 * 0xC - ($ - $$) db 0 ; just to know if I surpass limit to add another
 ; 5 sectors already probably more, just FOURTEEN MORE ICONS (if you ask, this is only 1)
 ; 6 sectors, and I have 2 proyects, this is B, but i changed the name on this one, i guess this is the real
 ; 9 sectors, pretty unnoticeable to the eye :) maybe 5 kB
-
+hw:
 ; app.asm
-org 0x1000
 ; file headers
-db 00101000b, hw.end - hw.begin, "hw", 0, hw.end - hw.begin
-hw.end:
+db 00101000b
+db hw.end - hw.begin
+db "hw", 0
+dw hw.end - hw.begin, 0
 hw.begin:
+	mov word[0x100002], 0xFD28
+	mov edi, 0xFD280000
+	mov ecx, 0xB7000
+	mov al, 0x10
+	rep stosb
+	call desktop.update
+hw.end:
