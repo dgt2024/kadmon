@@ -4,7 +4,7 @@ kernel.bootloader:
 	mov ax, 0x4F02
 	mov bx, 0x4105
 	int 0x10
-	mov ax, 0x020D
+	mov ax, 0x020E
 	mov cx, 1
 	mov dl, 0x80
 	; this 0x80 means the disk 1, a.k.a. A:/
@@ -23,14 +23,6 @@ kernel.bootloader:
 	or eax, 1
 	mov cr0, eax
 	jmp 08h:kernel.main
-kernel:
-	dq 0x0000000000000000
-	dq 0x00CF9A000000FFFF
-	dq 0x00CF92000000FFFF
-kernel.desc:
-	dw kernel.end - kernel - 1
-	dd kernel
-kernel.end:
 use32
 kernel.main:
 	mov ax, 0x10
@@ -40,6 +32,8 @@ kernel.main:
 	mov gs, ax
 	mov ss, ax
 	mov esp, 0x9FC00
+	lidt [kernel.system.desc]
+	; debug code: prints to shell
 	; here begginning code begins :)
 	mov ecx, 0xB7000
 	mov edi, 0xFD180000
@@ -100,7 +94,8 @@ logo.render.border:
 	call kernel.load ; esi is address of file w/ header
 kernel.loop:
 	call mouse
-	call 0x700000
+	call kernel.active
+	call kernel.run
 	jmp kernel.loop
 mouse:
 	xor eax, eax
@@ -149,11 +144,22 @@ mouse.replace.skip:
 	add eax, edx
 	cmp eax, 0xC0000
 	jb mouse.skip
-	xor eax, eax
+	cmp eax, 0x180000
+	jb mouse.down
+mouse.up:
+	add eax, 0x400
+	cmp eax, 0xC0000
+	jb mouse.skip
+	jmp mouse.up
 mouse.skip:
 	mov dword[0x9008], eax ; calculated result
 	call mouse.print
 	ret
+mouse.down:
+	sub eax, 0x400
+	cmp eax, 0xC0000
+	jb mouse.skip
+	jmp mouse.down
 	; here went mouse position
 	; goes*, went*, goes*, went*, goes*, went*
 	; i decided to put it on stack, copying windows
@@ -192,16 +198,12 @@ mouse.poll:
 	; why not tho lol
 	; this is me 5 days later, I regret it
 	; the mouse worked, i didnt back up and it doesnt work anymlre
-	ax
-	mov dword[0x504], eax
 ; the mouse had scroll lock... yea, scroll lock I didn't know that existed
 	; it has been one month, i unregret it i might have finished now only one thing left
 	; the floppy disk controller, which is what i hate  
 times 510 - ($ - $$) db 0
 dw 0xAA55
 kernel.drivers:
-	pop edx
-	mov dword[0x508], edx
 	mov al, 0xA8
 	out 0x64, al
 	mov al, 0x20
@@ -238,8 +240,22 @@ kernel.drivers:
 	mov word[0x100000], 0xFD18
 	call desktop.update
 	mov byte[0x700000], 0xC3
-	mov edx, dword[0x508]
-	jmp edx
+	ret
+kernel.run:
+	xor eax, eax
+	mov edi, 0xFFFF0000
+	stosb
+	cmp al, 0
+	je kernel.run.end
+	mov byte[0x1000], al
+	mov edx, 0x700000
+	add edx, eax
+	shl eax, 16
+	add edx, eax
+	call edx
+	jmp kernel.run
+kernel.run.end:
+	ret
 desktop:
 	mov esi, desktop.files
 	mov edi, 0xFD18080A
@@ -268,13 +284,11 @@ desktop.proc:
 desktop.proc.skip:
 	ret
 desktop.update:
-	pop edx
-	mov dword[0x504], edx
 	mov esi, 0x100000
+	push esi
 desktop.update.loop:
 	xor eax, eax
 	lodsw ; read 0xFD18 into ax
-	push esi
 	cmp ax, 0xFD00 ; yeah whatever
 	jb desktop.update.end ; ends updates
 	mov edi, 0xFD0C0000
@@ -288,15 +302,14 @@ desktop.update.repetition:
 	stosb
 desktop.update.skip:
 	loop desktop.update.repetition
-	pop esi
 	jmp desktop.update.loop
 desktop.update.end:
+	pop esi
 	mov edi, 0xFD000000
 	mov esi, 0xFD0C0000
 	mov ecx, 0xC0000
 	rep movsb
-	mov edx, dword[0x504]
-	jmp edx
+	ret
 desktop.update.space:
 	inc edi
 	jmp desktop.update.skip
@@ -369,7 +382,7 @@ text.char:
 	ret
 text.nibble: ; its not printing fully, just half
 	; edi is offset ; 0xFD0C0000
-	; bl is color ; 0x0F
+	; dl is color ; 0x0F
 	; al is char = 0 a.k.a null just for debugging
 	; cl is nibble (least significant bit / 1)
 	; btw this is a copy from another OS i made (altough its real-mode, so i couldn't copy paste)
@@ -423,13 +436,100 @@ text.nibble.godown:
 text.nibble.skipadd:
 	inc edi
 	jmp text.nibble.skip
-kernel.mouse:
-	mov eax, mouse
-	call eax
+;mostly kernel shit
+kernel.unload: ; opposite of load
+	; active (running) process is closed
+	xor ebx, ebx
+	mov bl, byte[0x1000] ; bl is process - 0 to 60
+	push ebx
+	; what to erase:
+	; 1. VRAM registering
+	; 2. RAM registering lol (0xFFFF0000)
+	; VRAM deletion and swap
+	mov eax, 0xC
+	mul ebx
+	add eax, 0xFD23
+	mov ebx, eax
+	mov esi, 0x100000
+kernel.unload.video:
+	lodsw
+	cmp ax, bx
+	jne kernel.unload.video
+	push eax
+	mov edi, esi
+	times 2 dec edi
+kernel.unload.move:
+	movsw
+	cmp ax, 0
+	jne kernel.unload.move
+	mov esi, 0xFFFF0000
+	pop eax
+	pop ebx
+	push eax
+kernel.unload.task:
+	lodsb
+	cmp al, bl
+	jne kernel.unload.task
+	mov edi, esi
+	times 2 dec edi
+kernel.unload.close:
+	movsb
+	cmp al, 0
+	jne kernel.unload.close
+	pop eax
+	shl eax, 16
+	mov edi, eax
+	mov ecx, 0xC0000
+	mov al, 0
+	rep stosd
+	call desktop.update
+	ret
+kernel.memory:
+	shl esi, 26
+	add esi, 1
+	ret
+kernel.active:
+	mov esi, 0x100002
+kernel.active.loop:
+	xor eax, eax
+	lodsw
+	cmp ax, 0
+	je kernel.active.end
+	push esi
+	shl eax, 16
+	mov esi, eax
+	add esi, dword[0x9008]
+	lodsb
+	pop esi
+	cmp al, 0
+	jne kernel.active.record
+kernel.active.return:
+	jmp kernel.active.loop
+kernel.active.end:
+	mov byte[0x1001], bl
+	ret
+kernel.active.record:
+	xor eax, eax
+	lodsw
+	sub esi, 2
+	sub ax, 0xFD00
+	mov ebx, 0xC
+	div ebx
+	mov ebx, eax
+	jmp kernel.active.return
+kernel.load.custom:
+	; doesn't recognize, hence app 1 (0-based, hence, 0)
+	mov byte[0x1000], 0
+	jmp kernel.load.jump
 kernel.load:
 	; esi is the address of the application with structure
-	pop eax
-	mov dword[0x500], eax
+	mov ebx, esi
+	cmp ebx, hw
+	je kernel.load.custom
+	sub ebx, 0xFC000000
+	shr ebx, 17
+	mov byte[0x1000], bl
+kernel.load.jump:
 	push esi
 	lodsb
 	and al, 00000011b
@@ -446,24 +546,95 @@ kernel.load.find:
 	movzx edx, ax
 	mov edi, 0x200000
 	rep movsb
-	mov al, 0xC3
-	stosb
 	pop edi
 	push esi
 	mov esi, edi
 	lodsb
 	test al, 00000100b
-	jz kernel.skip
+	jz kernel.load.skip
+	xor ebx, ebx
+	mov bl, byte[0x1000]
 	mov ecx, edx
 	mov edi, 0x700000
+	mov edx, ebx
+	shl edx, 16
+	add edi, edx
+	add edi, ebx
 	rep movsb
 	mov al, 0xC3
 	stosb
-kernel.skip:
+	mov esi, 0xFFFF0000
+kernel.load.task:
+	lodsb
+	cmp al, 0
+	jne kernel.load.task
+	dec edi
+	mov al, bl
+	stosb
+kernel.load.skip:
 	pop esi
 	call 0x200000
-	mov eax, dword[0x500]
-	jmp eax
+	ret
+kernel.spawn:
+	xor ebx, ebx
+	mov bl, byte[0x1000]
+kernel.spawn.return:
+	mov esi, 0x100000
+	mov eax, 0xC ; 0 :)
+	mul ebx ; 0x0 = 0
+	add eax, 0xFD28 ; jk 0xFD28
+	mov bx, ax ; bx = 0xFD28
+kernel.spawn.find:
+	lodsw ; to ax
+	cmp ax, bx ; is ax bx?
+	je kernel.spawn.end ; yayy
+	cmp ax, 0 ; noooo
+	jne kernel.spawn.find
+	mov edi, esi
+	sub edi, 4
+	mov ax, bx
+	stosw
+	shl eax, 16
+	mov edi, eax
+	ret
+kernel.spawn.end:
+	mov ax, bx
+	shl eax, 16
+	mov edi, eax
+	ret
+kernel.log:
+	mov dx, 0x3F8
+	out dx, al
+	ret
+text.int:
+	; eax
+	push edx
+	mov ebx, eax
+	mov ecx, 28
+text.int.loop:
+	mov edx, 0x0000000F
+	shl edx, cl
+	mov eax, ebx
+	and eax, edx
+	push ecx
+	neg cl
+	add cl, 29
+	shr eax, cl
+	pop ecx
+	add al, 48
+	cmp al, 57
+	ja text.int.hex
+text.int.return
+	sub cl, 3
+	pop edx
+	push edx
+	call text.char
+	loop text.int.loop
+	pop edx
+	ret
+text.int.hex:
+	add al, 7
+	jmp text.int.return
 ; this comment below chose the structure of this whole proyect
 ; from here until whenever i want, textures
 logo.init: ; 1-color version of an .img
@@ -1204,6 +1375,64 @@ keyboard.ascii:
 	db 'F', 'G', 'H', 'J', 'K', 'L', ';', '\'
 	db 0, 0, 'Z', 'X', 'C', 'V', 'B', 'N', 'M'
 	db ',', '_', '/', 0, 0, 0, 0, 0, 0
+; syscall
+kernel:
+	dq 0x0000000000000000
+	dq 0x00CF9A000000FFFF
+	dq 0x00CF92000000FFFF
+kernel.desc:
+	dw kernel.end - kernel - 1
+	dd kernel
+kernel.end:
+kernel.system.entry:
+	dw kernel.system, 0x08
+	db 0, 0x8E
+	dw kernel.system >> 16
+kernel.system.desc:
+	dw 7
+	dd kernel.system.entry
+kernel.system:
+	pusha
+	cmp cl, 0 ; kernel.spawn
+	je kernel.system.c0
+	cmp cl, 1 ; kernel.unload
+	je kernel.system.c1
+	cmp cl, 2 ; desktop.update
+	je kernel.system.c2
+	cmp cl, 3 ; keyboard
+	je kernel.system.c5
+	cmp cl, 4 ; text
+	je kernel.system.c4
+	cmp cl, 5 ; text.integer
+	je kernel.system.c5
+	cmp cl, 6
+	je kernel.system.c6
+kernel.system.return:
+	popa
+	iret
+kernel.system.c0:
+	popa
+	call kernel.spawn
+	iret
+kernel.system.c1:
+	call kernel.unload
+	jmp kernel.system.return
+kernel.system.c2:
+	call desktop.update
+	jmp kernel.system.return
+kernel.system.c3:
+	popa
+	call keyboard
+	iret
+kernel.system.c4:
+	call text
+	jmp kernel.system.return
+kernel.system.c5:
+	call text.int
+	jmp kernel.system.return
+kernel.system.c6:
+	call icon
+	jmp kernel.system.return
 ; here's finally where the files are :)
 ; Hard-coded folder's I've made:
 ; file system:
@@ -1214,22 +1443,34 @@ keyboard.ascii:
 	; bM: 0x00
 desktop.files: 
 	db 00011000b, 0x00, "My File", 0 ; a file!, such surprise
-times 512 * 0xC - ($ - $$) db 0 ; just to know if I surpass limit to add another secto
+times 512 * 0xD - ($ - $$) db 0 ; just to know if I surpass limit to add another secto
 ; 5 sectors already probably more, just FOURTEEN MORE ICONS (if you ask, this is only 1)
 ; 6 sectors, and I have 2 proyects, this is B, but i changed the name on this one, i guess this is the real
 ; 9 sectors, pretty unnoticeable to the eye :) maybe 5 kB
 hw:
 ; app.asm
 ; file headers
-db 00101000b
+db 00101100b
 db hw.end - hw.begin
 db "hw", 0
+; actual data (above is file headers / system)
 dw hw.end - hw.begin, 0
 hw.begin:
-	mov word[0x100002], 0xFD28
-	mov edi, 0xFD280000
+	mov cl, 0
+	int 0
 	mov ecx, 0xB7000
 	mov al, 0x10
 	rep stosb
-	call desktop.update
+	; print
+	mov cl, 0
+	int 0
+	mov esi, hw.str
+	mov bl, 0x1E
+	mov cl, 4
+	int 0
+	; call text
+	mov cl, 2
+	int 0
+	ret
+hw.str: db "Hello, World!", 0
 hw.end:
