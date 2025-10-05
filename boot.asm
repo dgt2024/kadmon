@@ -1,10 +1,65 @@
 org 0x7C00
 use16
+; this comments down here explain the structure, addresses
+; 	so you can read this clearer, you can find the structure
+;	of the code and the structure of the RAM in C/C++ terms
+; structure of this whole project, i just got tired of looking
+; for everything, i'll look for notepad++ hyperlinks i guess
+;
+; code structure
+; 	bootloader:
+;		logo / background-desktop
+;		kernel :3
+;		mouse
+; 	kernel:
+;		mouse
+;		keyboard
+;		desktop
+;		icon
+;		text
+;		timer
+;		kernel
+;		textures/bitmaps/data
+;
+; RAM structure: very necesary bc im forgetting
+; 	0x00000600	uint32_t mouse button
+;	0x00000604	uint32_t mouse old offset
+;	0x00000605	uint32_tmouse offset
+;	0x00000700	uint8_t keyboard scancodes
+;	0x00000800	uint8_t keyboard ascii
+; 	0x00001000 	uint8_t running app
+; 	0x00001001 	uint8_t active app
+; 	0x00002000 	[uint8_t] array of running apps :3
+; 	0x00003000
+; 	0x00007C00	kernel and bootloader
+;	0x00100000 	[uint16_t] all VRAM addresess << 16 so 0xFD0C is 0xFD0C0000
+; 	0x00200000 	void* all loop programs up to 0x10000, so app 1 goes from
+;          		0x200000 to 0x210000
+;	0x00600000	[uint16_t] address of where EIP ended at
+; 	0x01000000 	[...] RAM of programs so prog 1 has 0x1000000 to
+;           	0x4000000
+; 	0xFD000000 	[int[0xC0000]] VRAM up to 0xFFFF0000, where
+;            	0xFFFF0000 was used instead of now's 0x2000
+;
+; interrupt table commands:
+;	modules:
+;		0:
+;	get VRAM address : 0x00
+;	get RAM address	: 0x01
+;	end process	: 0x02
+;	update screen : 0x10
+;	print text : 0x11
+;	print char : 0x12
+;	print half a char : 0x13
+;	print in-built icon : 0x14
+;	print .img file : 0x15
+;	get key : 0x20
+;	wait X milliseconds : 0x21
+;	get time in cl:bh:bl : 0x22
+; 	get date in cl/bh/bl: 0x23
+; you're welcome, future me and whoever will read this
 kernel.bootloader:
-	mov ax, 0x4F02
-	mov bx, 0x4105
-	int 0x10
-	mov ax, 0x020E
+	mov ax, 0x0214
 	mov cx, 1
 	mov dl, 0x80
 	; this 0x80 means the disk 1, a.k.a. A:/
@@ -12,6 +67,10 @@ kernel.bootloader:
 	mov bx, 0x7C00
 	int 0x13
 	; todo: take desktop out of the HDD/floppy
+	; also here i switch to graphics mode
+	mov ax, 0x4F02
+	mov bx, 0x4105
+	int 0x10
 	cli
 	xor ax, ax
 	mov ds, ax
@@ -32,15 +91,16 @@ kernel.main:
 	mov gs, ax
 	mov ss, ax
 	mov esp, 0x9FC00
-	lidt [kernel.system.desc]
+	lidt [exception.desc]
 	; debug code: prints to shell
+	call kernel.message
 	; here begginning code begins :)
 	mov ecx, 0xB7000
 	mov edi, 0xFD180000
-background:
+logo:
 	mov al, 0x03
 	stosb
-	loop background
+	loop logo
 	mov ecx, 0x9000
 	mov al, 0x07
 	rep stosb
@@ -87,14 +147,21 @@ logo.render.border:
 	; code to add this is end
 	; debugging .raw
 	call desktop
-	; todo: read desktop
+	; todo read desktop
 	; now mousecursor
 	call kernel.drivers
-	mov esi, hw
-	call kernel.load ; esi is address of file w/ header
+	mov esi, shell
+	call kernel.load
 kernel.loop:
+	in al, 0x64
+	test al, 0x01
+	jz kernel.loop.return
+	test al, 0x20
+	jz keyboard
 	call mouse
-	call kernel.active
+kernel.loop.return:
+	mov byte[0x600], 0
+	mov byte[0x700], 0
 	call kernel.run
 	jmp kernel.loop
 mouse:
@@ -104,9 +171,9 @@ mouse:
 	mov edx, eax
 	call mouse.poll
 	mov bl, al
-	and al, 00001000b
-	jz mouse
-	mov eax, dword[0x9008]
+	test al, 28
+	jz mouse.jump
+	mov eax, dword[0x608]
 	mov esi, 0xFD0C0000
 	mov edi, 0xFD000000 
 	add esi, eax
@@ -125,7 +192,7 @@ mouse.replace.skip:
 	add esi, 0x3F4
 	pop ecx
 	loop mouse.replace
-	mov dword[0x9000], ebx ; buttons
+	mov dword[0x600], ebx ; buttons
 	xor eax, eax
 	mov ebx, eax
 	mov ecx, eax
@@ -134,32 +201,26 @@ mouse.replace.skip:
 	mov cl, al
 	call mouse.poll
 	mov dl, al
-	mov eax, dword[0x9008]
-	mov dword[0x9004], eax
+	mov ebx, dword[0x608]
+	mov dword[0x604], ebx
+	mov eax, ebx
 	movsx ecx, cl ; cl is x delta
 	movsx edx, dl ; dl is -y delta
 	shl edx, 10 ; edx *= 1024(2^10)
 	neg edx ; edx = -edx
 	add eax, ecx ; pos = pos+x+y*1024
 	add eax, edx
-	cmp eax, 0xC0000
-	jb mouse.skip
-	cmp eax, 0x180000
-	jb mouse.down
-mouse.up:
-	add eax, 0x400
-	cmp eax, 0xC0000
-	jb mouse.skip
-	jmp mouse.up
-mouse.skip:
-	mov dword[0x9008], eax ; calculated result
+	call mouse.clamp
+	mov dword[0x608], eax ; calculated result
 	call mouse.print
+mouse.jump:
 	ret
-mouse.down:
-	sub eax, 0x400
-	cmp eax, 0xC0000
-	jb mouse.skip
-	jmp mouse.down
+mouse.poll:
+	in al, 0x64
+	test al, 0x21
+	jz mouse.poll
+	in al, 0x60
+	ret
 	; here went mouse position
 	; goes*, went*, goes*, went*, goes*, went*
 	; i decided to put it on stack, copying windows
@@ -176,92 +237,141 @@ mouse.print.loop:
 	add edi, eax ; edi = 0xFD0C0802
 	lodsw ; mov ax, word [ds:esi] / load mouse texture
 	mov ebx, eax ; ebx = 0x9000
-	and eax, 0x7FFF ; eax = 0x9000
-	add edi, eax ; edi = 0xFD009802
+	and eax, 0x7FFF ; eax = 0x1000
+	call mouse.print.check
+	add edi, eax ; edi = 0xFD0C1802
 	and ebx, 0x8000
 	shr ebx, 15
 	add ebx, 0x0F
 	mov al, bl
 	cmp edi, 0xFD0C0000
-	jnb mouse.print.skip
+	jns mouse.print.skip
 	stosb ; mov byte [es:edi], al
 mouse.print.skip:
 	loop mouse.print.loop
-	ret
-mouse.poll:
-	in al, 0x64
-	test al, 0x21
-	jz mouse.poll
-	in al, 0x60
 	ret
 	; time to uhm idk , "I'll make the desktop"
 	; why not tho lol
 	; this is me 5 days later, I regret it
 	; the mouse worked, i didnt back up and it doesnt work anymlre
-; the mouse had scroll lock... yea, scroll lock I didn't know that existed
+	; the mouse had scroll lock... yea, scroll lock I didn't know that existed
 	; it has been one month, i unregret it i might have finished now only one thing left
-	; the floppy disk controller, which is what i hate  
+	; the floppy disk controller, which is what i hate, has vanished  
 times 510 - ($ - $$) db 0
 dw 0xAA55
-kernel.drivers:
-	mov al, 0xA8
-	out 0x64, al
+mouse.endofint:
+	push eax
 	mov al, 0x20
-	out 0x64, al
-	in al, 0x60
-	and al, 0xDF
-	or al, 0x02
-	mov ah, al
-	mov al, 0x60
-	out 0x64, al
-	mov al, ah
-	out 0x60, al
-	mov al, 0xD4
-	out 0x64, al
-	mov al, 0xF4
-	out 0x60, al
-	mov al, 0x11
-	out 0x20, al
 	out 0xA0, al
-	mov al, 0x20
-	out 0x21, al
-	mov al, 0x28
-	out 0xA1, al
-	mov al, 0x04
-	out 0x21, al
-	mov al, 0x02
-	out 0xA1, al
-	mov al, 0x01
-	out 0x21, al
-	out 0xA1, al
-	mov al, 0x0
-	out 0x21, al
-	out 0xA1, al
-	mov word[0x100000], 0xFD18
-	call desktop.update
-	mov byte[0x700000], 0xC3
+	out 0x20, al
+	pop eax
 	ret
-kernel.run:
-	xor eax, eax
-	mov edi, 0xFFFF0000
+mouse.clamp:
+	call mouse.endofint
+	; ebx is old
+	; ecx is X
+	add ebx, 0x400
+	mov edx, ebx
+	add edx, ecx
+	shr ebx, 10
+	shr edx, 10
+	cmp ebx, edx ; is old.Y > new.Y?	
+	ja mouse.left
+	cmp ebx, edx
+	jb mouse.right
+mouse.vertical:
+	cmp eax, 0xC0400
+	jb mouse.skip
+	cmp eax, 0x180400
+	jb mouse.down
+mouse.up:
+	add eax, 0x400
+	cmp eax, 0xC0400
+	jb mouse.skip
+	jmp mouse.up
+mouse.down:
+	sub eax, 0x400
+	cmp eax, 0xC0400
+	jb mouse.skip
+	jmp mouse.down
+mouse.skip:
+    sub ebx, 0x400
+	ret
+mouse.left:
+	shl ebx, 10
+	mov eax, ebx
+	jmp mouse.vertical
+mouse.right:
+	shl ebx, 10
+	add ebx, 0x3FF
+	mov eax, ebx
+	jmp mouse.vertical
+mouse.print.check:
+	push edx
+	push edi
+	push eax
+	mov edx, edi
+	and eax, 0x03FF
+	add edi, eax
+	shr edx, 10
+	shr edi, 10
+	cmp edx, edi
+	js mouse.print.bounds
+	pop eax
+	pop edi
+	pop edx
+	ret
+mouse.print.bounds:
+	pop eax
+	pop edi
+	pop edx
+	mov edi, 0xFD0C0000
+	ret
+keyboard:
+	mov ebx, 0x600
+	mov ecx, 0x700
+	mov ah, 0
+keyboard.loop:
+	in al, 0x64
+	test al, 0x01
+	jz keyboard.end
+	test al, 0x20
+	jnz keyboard.end
+	in al, 0x60
+	cmp ah, al
+	je keyboard.loop
+	mov ah, al
+	mov edi, ebx
 	stosb
-	cmp al, 0
-	je kernel.run.end
-	mov byte[0x1000], al
-	mov edx, 0x700000
-	add edx, eax
-	shl eax, 16
-	add edx, eax
-	call edx
-	jmp kernel.run
-kernel.run.end:
-	ret
+	mov ebx, edi
+	mov esi, keyboard.ascii
+	push eax
+	movzx eax, al
+	add esi, eax
+	pop eax
+	mov edi, ecx
+	movsb
+	mov ecx, edi
+	jmp keyboard.loop
+keyboard.end:
+    mov edi, ebx
+    mov al, 0
+    stosb
+    mov edi, ecx
+    stosb
+    mov al, 0x20
+    out 0x20, al
+	jmp kernel.loop.return
 desktop:
 	mov esi, desktop.files
 	mov edi, 0xFD18080A
 	call desktop.proc
+	mov word[0x100000], 0xFD18
+	call desktop.update
 	ret
 desktop.proc:
+	; esi is the address of the file
+	; edi is the address destination
 	lodsb
 	test al, 0x80
 	jnz desktop.proc.skip
@@ -285,10 +395,10 @@ desktop.proc.skip:
 	ret
 desktop.update:
 	mov esi, 0x100000
-	push esi
 desktop.update.loop:
 	xor eax, eax
 	lodsw ; read 0xFD18 into ax
+	push esi
 	cmp ax, 0xFD00 ; yeah whatever
 	jb desktop.update.end ; ends updates
 	mov edi, 0xFD0C0000
@@ -302,6 +412,7 @@ desktop.update.repetition:
 	stosb
 desktop.update.skip:
 	loop desktop.update.repetition
+	pop esi
 	jmp desktop.update.loop
 desktop.update.end:
 	pop esi
@@ -313,15 +424,6 @@ desktop.update.end:
 desktop.update.space:
 	inc edi
 	jmp desktop.update.skip
-keyboard:
-	xor eax, eax
-	in al, 0x60
-	mov esi, keyboard.ascii
-	add esi, eax
-	dec edi
-	mov ah, al
-	lodsb ; what is in esi, a.k.a, keyboard.ascii + al
-	ret
 icon:
 	cmp al, 0
 	je icon.print.raw
@@ -331,6 +433,16 @@ icon:
 	je icon.print.folder
 	cmp al, 3
 	je icon.print.html
+	cmp al, 4
+	je icon.print.sys
+	cmp al, 5
+	je icon.print.exe
+	cmp al, 7
+	je icon.print.bin
+	cmp al, 8
+	je icon.print.cfea
+	cmp al, 11
+	je icon.print.img
 	ret
 icon.print:
 	shr ecx, 1
@@ -347,6 +459,32 @@ icon.print.loop:
 	stosb ; mov word [es:edi], ax
 	loop icon.print.loop
 	ret
+icon.bitmap:
+    mov ecx, 24
+icon.bitmap.row:
+    xor eax, eax
+    lodsd
+    mov edx, 0x800000
+    push ecx
+    mov ecx, 24
+icon.bitmap.loop:
+    mov ebx, eax
+    and ebx, edx
+    shr edx, 1
+    dec cl
+    shr ebx, cl
+    inc cl
+    add ebx, 0x0F
+    push eax
+    mov al, bl
+    stosb
+    pop eax
+    loop icon.bitmap.loop
+    ; go down a row
+    pop ecx
+    add edi, 0x3E8
+    loop icon.bitmap.row
+    ret
 icon.print.raw:
 	mov esi, icon.raw.init
 	mov ecx, icon.raw.end - icon.raw.init
@@ -357,8 +495,22 @@ icon.print.folder:
 	jmp icon.print
 icon.print.html:
 	mov esi, icon.html.init
-	mov ecx, icon.html.end - icon.html.init
-	jmp icon.print
+	jmp icon.bitmap
+icon.print.sys:
+	mov esi, icon.sys.init
+	jmp icon.bitmap
+icon.print.exe:
+	mov esi, icon.exe.init
+	jmp icon.bitmap
+icon.print.bin:
+    mov esi, icon.bin.init
+    jmp icon.bitmap
+icon.print.cfea:
+	mov esi, icon.cfea.init
+	jmp icon.bitmap
+icon.print.img:
+    mov esi, icon.img.init
+    jmp icon.bitmap
 text:
 	lodsb
 	push eax
@@ -436,176 +588,6 @@ text.nibble.godown:
 text.nibble.skipadd:
 	inc edi
 	jmp text.nibble.skip
-;mostly kernel shit
-kernel.unload: ; opposite of load
-	; active (running) process is closed
-	xor ebx, ebx
-	mov bl, byte[0x1000] ; bl is process - 0 to 60
-	push ebx
-	; what to erase:
-	; 1. VRAM registering
-	; 2. RAM registering lol (0xFFFF0000)
-	; VRAM deletion and swap
-	mov eax, 0xC
-	mul ebx
-	add eax, 0xFD23
-	mov ebx, eax
-	mov esi, 0x100000
-kernel.unload.video:
-	lodsw
-	cmp ax, bx
-	jne kernel.unload.video
-	push eax
-	mov edi, esi
-	times 2 dec edi
-kernel.unload.move:
-	movsw
-	cmp ax, 0
-	jne kernel.unload.move
-	mov esi, 0xFFFF0000
-	pop eax
-	pop ebx
-	push eax
-kernel.unload.task:
-	lodsb
-	cmp al, bl
-	jne kernel.unload.task
-	mov edi, esi
-	times 2 dec edi
-kernel.unload.close:
-	movsb
-	cmp al, 0
-	jne kernel.unload.close
-	pop eax
-	shl eax, 16
-	mov edi, eax
-	mov ecx, 0xC0000
-	mov al, 0
-	rep stosd
-	call desktop.update
-	ret
-kernel.memory:
-	shl esi, 26
-	add esi, 1
-	ret
-kernel.active:
-	mov esi, 0x100002
-kernel.active.loop:
-	xor eax, eax
-	lodsw
-	cmp ax, 0
-	je kernel.active.end
-	push esi
-	shl eax, 16
-	mov esi, eax
-	add esi, dword[0x9008]
-	lodsb
-	pop esi
-	cmp al, 0
-	jne kernel.active.record
-kernel.active.return:
-	jmp kernel.active.loop
-kernel.active.end:
-	mov byte[0x1001], bl
-	ret
-kernel.active.record:
-	xor eax, eax
-	lodsw
-	sub esi, 2
-	sub ax, 0xFD00
-	mov ebx, 0xC
-	div ebx
-	mov ebx, eax
-	jmp kernel.active.return
-kernel.load.custom:
-	; doesn't recognize, hence app 1 (0-based, hence, 0)
-	mov byte[0x1000], 0
-	jmp kernel.load.jump
-kernel.load:
-	; esi is the address of the application with structure
-	mov ebx, esi
-	cmp ebx, hw
-	je kernel.load.custom
-	sub ebx, 0xFC000000
-	shr ebx, 17
-	mov byte[0x1000], bl
-kernel.load.jump:
-	push esi
-	lodsb
-	and al, 00000011b
-	movzx eax, al
-	add esi, eax
-	times 2 inc esi
-kernel.load.find:
-	lodsb
-	cmp al, 0
-	jne kernel.load.find
-	lodsw
-	movzx ecx, ax
-	lodsw
-	movzx edx, ax
-	mov edi, 0x200000
-	rep movsb
-	pop edi
-	push esi
-	mov esi, edi
-	lodsb
-	test al, 00000100b
-	jz kernel.load.skip
-	xor ebx, ebx
-	mov bl, byte[0x1000]
-	mov ecx, edx
-	mov edi, 0x700000
-	mov edx, ebx
-	shl edx, 16
-	add edi, edx
-	add edi, ebx
-	rep movsb
-	mov al, 0xC3
-	stosb
-	mov esi, 0xFFFF0000
-kernel.load.task:
-	lodsb
-	cmp al, 0
-	jne kernel.load.task
-	dec edi
-	mov al, bl
-	stosb
-kernel.load.skip:
-	pop esi
-	call 0x200000
-	ret
-kernel.spawn:
-	xor ebx, ebx
-	mov bl, byte[0x1000]
-kernel.spawn.return:
-	mov esi, 0x100000
-	mov eax, 0xC ; 0 :)
-	mul ebx ; 0x0 = 0
-	add eax, 0xFD28 ; jk 0xFD28
-	mov bx, ax ; bx = 0xFD28
-kernel.spawn.find:
-	lodsw ; to ax
-	cmp ax, bx ; is ax bx?
-	je kernel.spawn.end ; yayy
-	cmp ax, 0 ; noooo
-	jne kernel.spawn.find
-	mov edi, esi
-	sub edi, 4
-	mov ax, bx
-	stosw
-	shl eax, 16
-	mov edi, eax
-	ret
-kernel.spawn.end:
-	mov ax, bx
-	shl eax, 16
-	mov edi, eax
-	ret
-kernel.log:
-	mov dx, 0x3F8
-	out dx, al
-	ret
 text.int:
 	; eax
 	push edx
@@ -624,7 +606,7 @@ text.int.loop:
 	add al, 48
 	cmp al, 57
 	ja text.int.hex
-text.int.return
+text.int.return:
 	sub cl, 3
 	pop edx
 	push edx
@@ -635,6 +617,479 @@ text.int.return
 text.int.hex:
 	add al, 7
 	jmp text.int.return
+time.wait:
+	; wait ecx of 1/10000 of a second
+time.wait.ms:
+	mov al, 0x30
+	out 0x43, al
+	mov ax, 1193
+	out 0x40, al
+	mov al, ah
+	out 0x40, al
+time.wait.loop:
+	in al, 0x61
+	test al, 0x20
+	jz time.wait.loop
+	loop time.wait.ms
+	ret
+time.time:
+	; cl:bh:bl
+	mov al, 0
+	call time.poll
+	mov bl, al
+	mov al, 2
+	call time.poll
+	mov bh, al
+	mov al, 4
+	call time.poll
+	mov cl, al
+	ret
+time.date:
+	; cl/bh/bl - DD/MM/YY
+	mov al, 7
+	call time.poll
+	mov cl, al
+	mov al, 8
+	call time.poll
+	mov bh, al
+	mov al, 9
+	call time.poll
+	mov bl, al
+	ret
+time.poll:
+	mov dx, 0x70
+	out dx, al
+	inc dx
+	in al, dx
+	mov ah, al
+	shr ah, 4
+	and al, 0x0F
+	push eax
+	and eax, 0x0000FF00
+	shr eax, 8
+	mov dh, al
+	pop eax
+	mov ah, dh
+	add al, ah
+	ret
+; mostly kernel stuff
+kernel.drivers:
+	mov al, 0xA8
+	out 0x64, al
+	mov al, 0x20
+	out 0x64, al
+	in al, 0x60
+	and al, 0xDF
+	or al, 0x02
+	mov ah, al
+	mov al, 0x60
+	out 0x64, al
+	mov al, ah
+	out 0x60, al
+	mov al, 0xD4
+	out 0x64, al
+	mov al, 0xF4
+	out 0x60, al
+	mov al, 0x11
+	out 0x20, al
+	out 0xA0, al
+	mov al, 0x20
+	out 0x21, al
+	mov al, 0x28
+	out 0xA1, al
+	mov al, 0x04
+	out 0x21, al
+	mov al, 0x02
+	out 0xA1, al
+	mov al, 0x01
+	out 0x21, al
+	out 0xA1, al
+	mov al, 0x0
+	out 0x21, al
+	out 0xA1, al
+	ret
+kernel.memory:
+	xor eax, eax
+	mov al, byte[0x1000]
+	mov esi, eax
+	shl esi, 26
+	add esi, 1
+	ret
+kernel.run: ; schedulers
+	mov esi, 0x2000
+kernel.run.loop:
+	lodsb
+	cmp al, 0
+	je kernel.run.end
+	push esi
+	push eax
+	shl al, 1
+	movzx eax, al
+	mov esi, 0x600000
+	add esi, eax
+	shl eax, 23
+	mov ebx, 0x1000000
+	add ebx, eax
+	xor eax, eax
+	lodsw
+	pop edx
+	pop esi
+	movzx edx, dl
+	shl edx, 16
+	add eax, edx
+	add eax, 0x200000
+	pusha
+	call kernel.run.pit ; waits uhm idk
+	mov dword[0x900], esp
+	mov esp, ebx
+	call eax ; where eax is last address
+	; if it comes here, program ends
+	call kernel.unload ; i gotta close it...
+kernel.run.return:
+	hlt
+	mov esp, dword[0x900]
+	popa
+	jmp kernel.run.loop
+kernel.run.end:
+	ret
+kernel.run.pit:
+	push eax
+	in al, 0x21
+	and al, 0xFE
+	out 0x21, al
+	sti
+	mov al, 0x34
+	out 0x43, al
+	mov ax, 1193
+	out 0x40, al
+	mov al, ah
+	out 0x40, al
+	pop eax
+; task management - preemptive
+; i had to do this twice :(
+kernel.load: ; a way to start an app
+	; esi is RAM address, somehow
+	lodsb
+	and al, 3
+	cmp al, 0
+	je kernel.load.byte
+	cmp al, 1
+	je kernel.load.word
+	; unavailable app idk
+	ret
+kernel.load.skip:
+	mov ecx, eax
+kernel.load.loop:
+	lodsb
+	cmp al, 0
+	jne kernel.load.loop
+	push esi
+	mov esi, 0x2000
+kernel.load.reg:
+	lodsb
+	cmp al, 0
+	jne kernel.load.reg
+	dec esi
+	mov edi, esi
+	inc al
+	cmp al, 62
+	je kernel.load.end
+	stosb
+	pop esi
+	; al is task #
+	mov edi, 0x200000
+	movzx eax, al
+	shl eax, 16
+	add edi, eax
+	rep movsb
+	ret
+kernel.load.end:
+	pop esi
+	ret
+kernel.load.byte:
+	xor eax, eax
+	lodsb
+	jmp kernel.load.skip
+kernel.load.word:
+	xor eax, eax
+	lodsw
+	jmp kernel.load.skip
+kernel.unload:
+	ret
+kernel.spawn:
+	xor ebx, ebx
+	mov bl, byte[0x1000]
+kernel.spawn.return:
+	mov esi, 0x100000
+	mov eax, 0xC ; 0 :)
+	mul ebx ; 0x0 = 0
+	add eax, 0xFD24 ; jk 0xFD28
+	mov bx, ax ; bx = 0xFD28
+kernel.spawn.find:
+	lodsw ; to ax
+	cmp ax, bx ; is ax bx?
+	je kernel.spawn.end ; yayy
+	cmp ax, 0 ; noooo
+	jne kernel.spawn.find
+	mov edi, esi
+	sub edi, 2
+	mov ax, bx
+	stosw
+	shl eax, 16
+	mov edi, eax
+	ret
+kernel.spawn.end:
+	mov ax, bx
+	shl eax, 16
+	mov edi, eax
+	ret
+kernel.message:
+	mov esi, kernel.string
+	mov edi, 0xFD000801
+	mov bl, 0x1E
+	call text
+	mov ecx, 50000
+	call time.wait
+	ret
+kernel.string: db "Booting Kasmon OS a0.1", 0 ; boot message
+; this code down to the textures is uhh idk it was on the bottom
+; every line makes this whole thing and is probably my only source
+; of motivation, right now it has 1500 lines, exactly which makes me happy
+; syscalls :3 (data section i could say)
+; todo: fix this to add exceptions plz i dont wanna have eip at indonesia
+; GDT org: limit low - limit high - base low - base high - base middle -  access -
+; flags+limit high(4bits) - base high
+kernel:
+	dq 0x0000000000000000
+	dq 0x00CF9A000000FFFF
+	dq 0x00CF92000000FFFF
+kernel.desc:
+	dw kernel.end - kernel - 1
+	dd kernel
+kernel.end:
+exception:
+	dw exception.divby0, 0x08 ; some guy divided by 0
+	db 0, 0x8E
+	dw exception.divby0/0x10000
+	dw exception.unused, 0x08
+	db 0, 0x8E
+	dw exception.unused/0x10000
+	dw exception.panic, 0x08 ; memory, CPU, motherboard is damaged
+	db 0, 0x8E
+	dw exception.panic/0x10000
+	dw exception.debug, 0x08
+	db 0, 0x8E
+	dw exception.debug/0x10000
+	dw exception.unused, 0x08
+	db 0, 0x8E
+	dw exception.unused/0x10000
+	dw exception.unused, 0x08 ; unused (BOUND)
+	db 0, 0x8E
+	dw exception.unused/0x1000
+	dw exception.invalidopc, 0x08 ; invalid opcode
+	db 0, 0x8E
+	dw exception.invalidopc/0x10000
+	dw exception.nofloat, 0x08 ; lazy FPU/no FPU
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	dw exception.dfault, 0x08 ; double fault
+	db 0, 0x8E
+	dw exception.dfault/0x10000
+	dw exception.nofloat, 0x08 ; legacy FPU
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	dw exception.invalidtask, 0x08 ; invalid task (TSS task selector)
+	db 0, 0x8E
+	dw exception.invalidtask/0x10000
+	dw exception.invalidtask, 0x08 ; non-present-segment
+	db 0, 0x8E
+	dw exception.invalidtask/0x10000
+	dw exception.memoryleak, 0x08
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	dw exception.memoryleak, 0x08; protection violation
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	dw exception.memoryleak, 0x08 ; invalid memory access
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	times 8 db 0 ; reserved
+	dw exception.nofloat, 0x08 ; FPU error
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	dw exception.memoryleak, 0x08 ; unaligned mem access
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	dw exception.panic, 0x08
+	db 0, 0x8E
+	dw exception.panic/0x10000
+	dw exception.nofloat, 0x08
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	times 88 db 0
+	dw kernel.system, 0x08 ; system call, a.k.a int 0x21 :3 (i think lol)
+	db 0, 0x8E
+	dw kernel.system/0x10000
+exception.desc:
+	dw exception.desc - exception - 1
+	dd exception
+exception.unused:
+	iret
+exception.divby0:
+	mov eax, 0
+	mov edx, 0
+	iret
+exception.panic:
+	mov edi, 0xFD000000
+	mov al, 0x07
+	rep stosb
+	mov esi, exception.panic.message
+	mov edi, 0xFD010000
+	mov bl, 0x1E
+	call text
+	hlt
+	iret
+exception.panic.message: db "FATAL ERROR: Your computer is broken", 0
+exception.invalidopc:
+	call kernel.unload
+	iret ; todo message
+exception.nofloat:
+	iret ;  i don't think ill use floats but maybe idk whats an FPU
+exception.dfault:
+	mov edi, 0xFD000000
+	mov ecx, 0xC0000
+	mov al, 0x07
+	rep stosb
+	mov esi, exception.dfault.message
+	mov edi, 0xFD010000
+	mov bl, 0x1E
+	call text
+	hlt
+	iret
+exception.dfault.message: db "FATAL ERROR: An error has ocurred, reset your computer", 0
+exception.invalidtask:
+	; todo: using paging, jump to task 0 or open shell
+	iret
+exception.memoryleak:
+	; show memory leak error
+	call kernel.unload
+	iret
+exception.pitinterrupt:
+	mov eax, dword[esp]
+	mov bl, byte[0x1000]
+	shl bl, 1
+	movzx ebx, bl
+	mov edi, 0x600000
+	add edi, ebx
+	stosw
+	jmp kernel.run.return
+exception.debug:
+	mov dx, 0x3F8
+	mov al, '#'
+	out dx, al
+	iret
+kernel.system:
+	pusha
+	cmp cl, 0x00
+	je kernel.system.kernel0
+	cmp cl, 0x01
+	je kernel.system.kernel1
+	cmp cl, 0x02
+	je kernel.system.kernel2
+	cmp cl, 0x10
+	je kernel.system.display0
+	cmp cl, 0x11
+	je kernel.system.display1
+	cmp cl, 0x12
+	je kernel.system.display2
+	cmp cl, 0x13
+	je kernel.system.display3
+	cmp cl, 0x14
+	je kernel.system.display4
+	cmp cl, 0x15
+	je kernel.system.display5
+	cmp cl, 0x20
+	je kernel.system.peripheral0
+	cmp cl, 0x21
+	je kernel.system.peripheral1
+	cmp cl, 0x22
+	je kernel.system.peripheral2
+kernel.system.return:
+	popa
+	iret
+kernel.system.kernel0:
+	popa
+	call kernel.spawn
+	iret
+kernel.system.kernel1:
+	popa
+	call kernel.memory
+	iret
+kernel.system.kernel2:
+	call kernel.unload
+	jmp kernel.system.return
+kernel.system.display0:
+	call desktop.update
+	jmp kernel.system.return
+kernel.system.display1:
+	call text
+	jmp kernel.system.return
+kernel.system.display2:
+	call text.char
+	jmp kernel.system.return
+kernel.system.display3:
+	call text.nibble
+	jmp kernel.system.return
+kernel.system.display4:
+	call icon
+	jmp kernel.system.return
+kernel.system.display5:
+	call icon.print
+	jmp kernel.system.return
+kernel.system.peripheral0:
+	call time.wait
+	jmp kernel.system.return
+kernel.system.peripheral1:
+	popa
+	call time.time
+	iret
+kernel.system.peripheral2:
+	popa
+	call time.date
+	iret
+; here's finally where the files are :)
+; Hard-coded folder's I've made:
+; file system:
+	; exe T bit if 0 = no loop
+	; b1:bitflag Hidden?/4-bit protocol #/Tbit/2bit length size in bytes
+	; b2:size (accordingly)
+	; bN: name
+	; bM: 0x00
+desktop.files: 
+	db 00111000b, 0x00, "f.lm", 0 ; a file!, such surprise
+; hehehe
+
+
+; now an application, that does nothing... yet
+shell:
+; app.asm
+; file headers
+db 00101100b
+db shell.end - shell.init
+db "shell", 0
+shell.init:
+	shell.loop:
+		jmp shell.loop
+shell.end:
+
+
+keyboard.ascii:
+	db 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0
+	db ' ', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']'
+	db 0x20, 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\', 0
+	db 0, 0, 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', 0
+	db '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '7', '8', '9'
+	db '-', '4', '5', '6', '+', '1', '2', '3', '0', '.', 0, 0, '\', 0, 0
 ; this comment below chose the structure of this whole proyect
 ; from here until whenever i want, textures
 logo.init: ; 1-color version of an .img
@@ -683,6 +1138,11 @@ logo.init: ; 1-color version of an .img
 logo.end:
 mouse.init:
 ; smaller version of a .img file with 2 colors
+; brief explanation: edi+this but end-init times
+; so at 0, 0(0) + 0x8000 would print it uhm in the same spot
+; because color is the most significant bit, 1 is black and 0 is white
+; pretty much moddable idrk how to add more colors, thats why
+; all the icons are monotone
 	dw 0x8000, 0x8001
 	dw 0x8400, 0x0401, 0x8402
 	dw 0x8800, 0x0801, 0x0802, 0x8803
@@ -1026,151 +1486,155 @@ icon.folder.init:
 	dw 0xDC14, 0xDC15, 0xDC16, 0xDC17
 icon.folder.end:
 icon.html.init:
-	dw 0x8000, 0x8001, 0x8002, 0x8003
-	dw 0x8004, 0x8005, 0x8006, 0x8007
-	dw 0x8008, 0x8009, 0x800A, 0x800B
-	dw 0x800C, 0x800D, 0x800E, 0x800F
-	dw 0x8010, 0x8011, 0x8012, 0x8013
-	dw 0x8014, 0x8015, 0x8016, 0x8017
-	dw 0x8400, 0x0401, 0x0402, 0x0403
-	dw 0x0404, 0x0405, 0x0406, 0x0407
-	dw 0x0408, 0x0409, 0x040A, 0x840B
-	dw 0x040C, 0x040D, 0x040E, 0x840F
-	dw 0x0410, 0x0411, 0x0412, 0x8413
-	dw 0x0414, 0x0415, 0x0416, 0x8417
-	dw 0x8800, 0x0801, 0x0802, 0x0803
-	dw 0x0804, 0x0805, 0x0806, 0x0807
-	dw 0x0808, 0x0809, 0x080A, 0x880B
-	dw 0x080C, 0x080D, 0x080E, 0x880F
-	dw 0x0810, 0x0811, 0x0812, 0x8813
-	dw 0x0814, 0x0815, 0x0816, 0x8817
-	dw 0x8C00, 0x0C01, 0x0C02, 0x0C03
-	dw 0x0C04, 0x0C05, 0x0C06, 0x0C07
-	dw 0x0C08, 0x0C09, 0x0C0A, 0x8C0B
-	dw 0x0C0C, 0x0C0D, 0x0C0E, 0x8C0F
-	dw 0x0C10, 0x0C11, 0x0C12, 0x8C13
-	dw 0x0C14, 0x0C15, 0x0C16, 0x8C17
-	dw 0x9000, 0x9001, 0x9002, 0x9003
-	dw 0x9004, 0x9005, 0x9006, 0x9007
-	dw 0x9008, 0x9009, 0x900A, 0x900B
-	dw 0x900C, 0x900D, 0x900E, 0x900F
-	dw 0x9010, 0x9011, 0x9012, 0x9013
-	dw 0x9014, 0x9015, 0x9016, 0x9017
-	dw 0x9400, 0x1401, 0x1402, 0x1403
-	dw 0x1404, 0x1405, 0x1406, 0x1407
-	dw 0x1408, 0x1409, 0x140A, 0x140B
-	dw 0x140C, 0x140D, 0x140E, 0x140F
-	dw 0x1410, 0x1411, 0x1412, 0x1413
-	dw 0x1414, 0x1415, 0x1416, 0x9417
-	dw 0x9800, 0x1801, 0x9802, 0x0803
-	dw 0x9804, 0x0805, 0x9806, 0x9807
-	dw 0x9808, 0x0809, 0x980A, 0x180B
-	dw 0x180C, 0x180D, 0x980E, 0x180F
-	dw 0x9810, 0x1811, 0x1812, 0x1813
-	dw 0x1814, 0x1815, 0x1816, 0x9817
-	dw 0x9C00, 0x1C01, 0x9C02, 0x1C03
-	dw 0x9C04, 0x1C05, 0x1C06, 0x9C07
-	dw 0x1C08, 0x1C09, 0x9C0A, 0x9C0B
-	dw 0x1C0C, 0x9C0D, 0x9C0E, 0x1C0F
-	dw 0x9C10, 0x1C11, 0x1C12, 0x1C13
-	dw 0x1C14, 0x1C15, 0x1C16, 0x9C17
-	dw 0xA000, 0x2001, 0xA002, 0xA003
-	dw 0xA004, 0x2005, 0x2006, 0xA007
-	dw 0x2008, 0x2009, 0xA00A, 0xA00B
-	dw 0x200C, 0xA00D, 0xA00E, 0x200F
-	dw 0xA010, 0x2011, 0x2012, 0x2013
-	dw 0x2014, 0x2015, 0x2016, 0xA017
-	dw 0xA400, 0x2401, 0xA402, 0x2403
-	dw 0xA404, 0x2405, 0x2406, 0xA407
-	dw 0x2408, 0x2409, 0xA40A, 0x240B
-	dw 0x240C, 0x240D, 0xA40E, 0x240F
-	dw 0xA410, 0x2411, 0x2412, 0x2413
-	dw 0x2414, 0x2415, 0x2416, 0xA417
-	dw 0xA800, 0x2801, 0xA802, 0x2803
-	dw 0xA804, 0x2805, 0x2806, 0xA807
-	dw 0x2808, 0x2809, 0xA80A, 0x280B
-	dw 0x280C, 0x280D, 0xA80E, 0x280F
-	dw 0xA810, 0xA811, 0xA812, 0x2813
-	dw 0x2814, 0x2815, 0x2816, 0xA817
-	dw 0xAC00, 0x2C01, 0x2C02, 0x2C03
-	dw 0x2C04, 0x2C05, 0x2C06, 0x2C07
-	dw 0x2C08, 0x2C09, 0x2C0A, 0x2C0B
-	dw 0x2C0C, 0x2C0D, 0x2C0E, 0x2C0F
-	dw 0x2C10, 0x2C11, 0x2C12, 0x2C13
-	dw 0x2C14, 0x2C15, 0x2C16, 0xAC17
-	dw 0xB000, 0x3001, 0x3002, 0x3003
-	dw 0x3004, 0x3005, 0x3006, 0x3007
-	dw 0x3008, 0x3009, 0x300A, 0x300B
-	dw 0x300C, 0x300D, 0x300E, 0x300F
-	dw 0x3010, 0x3011, 0x3012, 0x3013
-	dw 0x3014, 0x3015, 0x3016, 0xB017
-	dw 0xB400, 0x3401, 0x3402, 0x3403
-	dw 0x3404, 0x3405, 0x3406, 0x3407
-	dw 0x3408, 0x3409, 0x340A, 0x340B
-	dw 0x340C, 0x340D, 0x340E, 0x340F
-	dw 0x3410, 0x3411, 0x3412, 0x3413
-	dw 0x3414, 0x3415, 0x3416, 0xB417
-	dw 0xB800, 0x3801, 0x3802, 0x3803
-	dw 0x3804, 0x3805, 0x3806, 0x3807
-	dw 0x3808, 0x3809, 0x380A, 0x380B
-	dw 0x380C, 0x380D, 0x380E, 0x380F
-	dw 0x3810, 0x3811, 0x3812, 0x3813
-	dw 0x3814, 0x3815, 0x3816, 0xB817
-	dw 0xBC00, 0x3C01, 0x3C02, 0x3C03
-	dw 0x3C04, 0x3C05, 0x3C06, 0x3C07
-	dw 0x3C08, 0x3C09, 0x3C0A, 0x3C0B
-	dw 0x3C0C, 0x3C0D, 0x3C0E, 0x3C0F
-	dw 0x3C10, 0x3C11, 0x3C12, 0x3C13
-	dw 0x3C14, 0x3C15, 0x3C16, 0xBC17
-	dw 0xC000, 0x4001, 0x4002, 0x4003
-	dw 0x4004, 0x4005, 0x4006, 0x4007
-	dw 0x4008, 0x4009, 0x400A, 0x400B
-	dw 0x400C, 0x400D, 0x400E, 0x400F
-	dw 0x4010, 0x4011, 0x4012, 0x4013
-	dw 0x4014, 0x4015, 0x4016, 0xC017
-	dw 0xC400, 0x4401, 0x4402, 0x4403
-	dw 0x4404, 0x4405, 0x4406, 0x4407
-	dw 0x4408, 0x4409, 0x440A, 0x440B
-	dw 0x440C, 0x440D, 0x440E, 0x440F
-	dw 0x4410, 0x4411, 0x4412, 0x4413
-	dw 0x4414, 0x4415, 0x4416, 0xC417
-	dw 0xC800, 0x4801, 0x4802, 0x4803
-	dw 0x4804, 0x4805, 0x4806, 0x4807
-	dw 0x4808, 0x4809, 0x480A, 0x480B
-	dw 0x480C, 0x480D, 0x480E, 0x480F
-	dw 0x4810, 0x4811, 0x4812, 0x4813
-	dw 0x4814, 0x4815, 0x4816, 0xC817
-	dw 0xCC00, 0x4C01, 0x4C02, 0x4C03
-	dw 0x4C04, 0x4C05, 0x4C06, 0x4C07
-	dw 0x4C08, 0x4C09, 0x4C0A, 0x4C0B
-	dw 0x4C0C, 0x4C0D, 0x4C0E, 0x4C0F
-	dw 0x4C10, 0x4C11, 0x4C12, 0x4C13
-	dw 0x4C14, 0x4C15, 0x4C16, 0xCC17
-	dw 0xD000, 0x5001, 0x5002, 0x5003
-	dw 0x5004, 0x5005, 0x5006, 0x5007
-	dw 0x5008, 0x5009, 0x500A, 0x500B
-	dw 0x500C, 0x500D, 0x500E, 0x500F
-	dw 0x5010, 0x5011, 0x5012, 0x5013
-	dw 0x5014, 0x5015, 0x5016, 0xD017
-	dw 0xD400, 0x5401, 0x5402, 0x5403
-	dw 0x5404, 0x5405, 0x5406, 0x5407
-	dw 0x5408, 0x5409, 0x540A, 0x540B
-	dw 0x540C, 0x540D, 0x540E, 0x540F
-	dw 0x5410, 0x5411, 0x5412, 0x5413
-	dw 0x5414, 0x5415, 0x5416, 0xD417
-	dw 0xD800, 0x5801, 0x5802, 0x5803
-	dw 0x5804, 0x5805, 0x5806, 0x5807
-	dw 0x5808, 0x5809, 0x580A, 0x580B
-	dw 0x580C, 0x580D, 0x580E, 0x580F
-	dw 0x5810, 0x5811, 0x5812, 0x5813
-	dw 0x5814, 0x5815, 0x5816, 0xD817
-	dw 0xDC00, 0xDC01, 0xDC02, 0xDC03
-	dw 0xDC04, 0xDC05, 0xDC06, 0xDC07
-	dw 0xDC08, 0xDC09, 0xDC0A, 0xDC0B
-	dw 0xDC0C, 0xDC0D, 0xDC0E, 0xDC0F
-	dw 0xDC10, 0xDC11, 0xDC12, 0xDC13
-	dw 0xDC14, 0xDC15, 0xDC16, 0xDC17
-icon.html.end:
+    dd 111111111111111111111111b
+    dd 100000000000001001001001b
+    dd 100000000000001001001001b
+    dd 111111111111111111111111b
+    dd 100000000000000000000001b
+    dd 101010111010001010000001b
+    dd 101010010011011010000001b
+    dd 101110010010101010000001b
+    dd 101010010010001010000001b
+    dd 101010010010001011100001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 111111111111111111111111b
+icon.sys.init:
+    dd 111111111111111111111111b
+    dd 100000000000001001001001b
+    dd 100000000000001001001001b
+    dd 111111111111111111111111b
+    dd 100000000000000000000001b
+    dd 100110101001100000000001b
+    dd 101000101010000000000001b
+    dd 100100010001000000000001b
+    dd 100010010000100000000001b
+    dd 101100010011000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 111111111111111111111111b
+icon.exe.init:
+    dd 111111111111111111111111b
+    dd 100000000000001001001001b
+    dd 100000000000001001001001b
+    dd 111111111111111111111111b
+    dd 100000000000000000000001b
+    dd 101110101011100000000001b
+    dd 101000101010000000000001b
+    dd 101110010011100000000001b
+    dd 101000101010000000000001b
+    dd 101110101011100000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 111111111111111111111111b
+icon.bin.init:
+    dd 111111111111111111111111b
+    dd 100000000000000000000001b
+    dd 100000110000000111110001b
+    dd 100001010000001000001001b
+    dd 100010010000010000000101b
+    dd 100100010000010000000101b
+    dd 100000010000010000000101b
+    dd 100000010000010000000101b
+    dd 100000010000010000000101b
+    dd 100000010000001000001001b
+    dd 101111111110000111110001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100011111000000001100001b
+    dd 100100000100000010100001b
+    dd 101000000010000100100001b
+    dd 101000000010001000100001b
+    dd 101000000010000000100001b
+    dd 101000000010000000100001b
+    dd 101000000010000000100001b
+    dd 100100000100000000100001b
+    dd 100011111000011111111101b
+    dd 100000000000000000000001b
+    dd 111111111111111111111111b
+icon.cfea.init:
+    dd 111111111111111111111111b
+    dd 100000000000001001001001b
+    dd 100000000000001001001001b
+    dd 111111111111111111111111b
+    dd 100000000000000000000001b
+    dd 100100111011100100000001b
+    dd 101010100010001010000001b
+    dd 101000111011101110000001b
+    dd 101010100010001010000001b
+    dd 10010010001110101000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 111111111111111111111111b
+icon.img.init:
+    dd 111111111111111111111111b
+    dd 100000000000000011111111b
+    dd 100000000000000011111111b
+    dd 100000000000000001111111b
+    dd 100000000000000001111111b
+    dd 100000000000000000111111b
+    dd 100111100111000000000111b
+    dd 101111111111100000000001b
+    dd 100111100111000000000001b
+    dd 100000000000000000000001b
+    dd 100000000010000000000001b
+    dd 100000000011111000000001b
+    dd 100000000000100000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000000000001b
+    dd 100000000000000100000001b
+    dd 100000000000001110000001b
+    dd 100000100000011111000001b
+    dd 100001110000111111100001b
+    dd 100011111111111111110001b
+    dd 100111111111111111111001b
+    dd 111111111111111111111111b
 	;ascii database holds all ascii characters as bitmaps
 text.database: ;  a bunch of bitmaps, a.k.a. .bmp files
 	dd 000000000000000000000000000000b
@@ -1296,6 +1760,7 @@ text.database: ;  a bunch of bitmaps, a.k.a. .bmp files
 	dd 100000100001000001000010000010b
 	dd 000100000100000000000000000000b ; \
 	; the fact that here, dd 0 i can't know if it works or not, i still don't understand
+	; its like weird bc now its not needed
 	dd 011100001000010000100001000010b
 	dd 000100111000000000000000000000b ; ]
 	dd 001000101010001000000000000000b
@@ -1365,112 +1830,75 @@ text.database: ;  a bunch of bitmaps, a.k.a. .bmp files
 	dd 000000000000000010011010110010b
 	dd 000000000000000000000000000000b ; ~
 	; I'm telling you know, this took me 6 hours to make, the whole ascii table :,(
-	; btw i didn't include non-printable characters, they're just a space
-keyboard.ascii:
-	db 0, 0, 0, 0, 0, 0, 0, 0, 0
-	db '`', '1', '2', '3', '4', '5', '6', '7'
-	db '8', '9', '0', '-', '=', '\\', 0, ' '
-	db 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I'
-	db 'O', 'P', '[', ']', 0, 'A', 'S', 'D'
-	db 'F', 'G', 'H', 'J', 'K', 'L', ';', '\'
-	db 0, 0, 'Z', 'X', 'C', 'V', 'B', 'N', 'M'
-	db ',', '_', '/', 0, 0, 0, 0, 0, 0
-; syscall
-kernel:
-	dq 0x0000000000000000
-	dq 0x00CF9A000000FFFF
-	dq 0x00CF92000000FFFF
-kernel.desc:
-	dw kernel.end - kernel - 1
-	dd kernel
-kernel.end:
-kernel.system.entry:
-	dw kernel.system, 0x08
-	db 0, 0x8E
-	dw kernel.system >> 16
-kernel.system.desc:
-	dw 7
-	dd kernel.system.entry
-kernel.system:
-	pusha
-	cmp cl, 0 ; kernel.spawn
-	je kernel.system.c0
-	cmp cl, 1 ; kernel.unload
-	je kernel.system.c1
-	cmp cl, 2 ; desktop.update
-	je kernel.system.c2
-	cmp cl, 3 ; keyboard
-	je kernel.system.c5
-	cmp cl, 4 ; text
-	je kernel.system.c4
-	cmp cl, 5 ; text.integer
-	je kernel.system.c5
-	cmp cl, 6
-	je kernel.system.c6
-kernel.system.return:
-	popa
-	iret
-kernel.system.c0:
-	popa
-	call kernel.spawn
-	iret
-kernel.system.c1:
-	call kernel.unload
-	jmp kernel.system.return
-kernel.system.c2:
-	call desktop.update
-	jmp kernel.system.return
-kernel.system.c3:
-	popa
-	call keyboard
-	iret
-kernel.system.c4:
-	call text
-	jmp kernel.system.return
-kernel.system.c5:
-	call text.int
-	jmp kernel.system.return
-kernel.system.c6:
-	call icon
-	jmp kernel.system.return
-; here's finally where the files are :)
-; Hard-coded folder's I've made:
-; file system:
-	; exe T bit if 0 = no loop
-	; b1:bitflag Hidden?/4-bit protocol #/Tbit/2bit length size in bytes
-	; b2:size (accordingly)
-	; bN: name
-	; bM: 0x00
-desktop.files: 
-	db 00011000b, 0x00, "My File", 0 ; a file!, such surprise
-times 512 * 0xD - ($ - $$) db 0 ; just to know if I surpass limit to add another secto
+	; btw i didn't include non-printable characters
+	; if u try to print them, nothing prints
+; i got well damn tired of scrolling 500 lines to get to this down here so welp
+debug.init:
+	push esi
+	push eax
+	mov esi, debug.init.str
+	call debug.cstr
+	pop eax
+	pop esi
+	ret
+debug.init.str: db "KDSS - a0.1: ", 0
+debug.cstr:
+	; esi string :D
+debug.cstr.loop:
+	lodsb
+	cmp al, 0
+	je debug.cstr.exit
+	call debug.log
+	jmp debug.cstr.loop
+debug.cstr.exit:
+	ret
+debug.log:
+	push edx
+	; 4-char string in eax
+	mov ecx, 4
+debug.log.loop:
+	call debug.init
+	mov dx, 0x3F8
+	out dx, al
+	rol eax, 4
+	loop debug.log.loop
+	pop edx
+	ret
+debug.test:
+	call debug.init
+	mov edi, debug.test.str
+	mov ecx, 8
+debug.test.loop:
+	rol eax, 4
+	mov dl, al
+	and dl, 0x0F
+	cmp dl, 9
+	jbe debug.test.digit
+	add dl, 'A'-10
+	jmp debug.test.store
+debug.test.digit:
+	add dl, '0'
+debug.test.store:
+	mov byte[edi], dl
+	inc edi
+	loop debug.test.loop
+	mov esi, debug.test.str
+	call debug.cstr
+	ret
+debug.test.str: db "00000000", 10, 0
+debug.stop:
+	hlt
+times 512 * 0xE - ($ - $$) db 0 ; just to know if I surpass limit to add another secto
 ; 5 sectors already probably more, just FOURTEEN MORE ICONS (if you ask, this is only 1)
 ; 6 sectors, and I have 2 proyects, this is B, but i changed the name on this one, i guess this is the real
 ; 9 sectors, pretty unnoticeable to the eye :) maybe 5 kB
-hw:
-; app.asm
-; file headers
-db 00101100b
-db hw.end - hw.begin
-db "hw", 0
-; actual data (above is file headers / system)
-dw hw.end - hw.begin, 0
-hw.begin:
-	mov cl, 0
-	int 0
-	mov ecx, 0xB7000
-	mov al, 0x10
-	rep stosb
-	; print
-	mov cl, 0
-	int 0
-	mov esi, hw.str
-	mov bl, 0x1E
-	mov cl, 4
-	int 0
-	; call text
-	mov cl, 2
-	int 0
-	ret
-hw.str: db "Hello, World!", 0
-hw.end:
+; 13 sectors, i have 11 icons left and no way I am doing them lol
+; note that this proyect is so big, i'm starting to use Ctrl+F
+; to look for labels :O
+; it's incredible how altough I kept trying to lower the amount
+; I have finished the task manager (not with the UI) and now
+; decided to make the icons and I reached 10kB, and 2000 lines
+; this is the 2000th line after I wrote this(17 sectors lol)
+; i decided 10kB is too much so I just made the code smaller than
+; its now 1540 lines and 6kB, 4kb differemce
+; it jumped back up to 1900 :D at least i'm not cheating lol, bc i just made the keyboard handler, 6.6kB too
