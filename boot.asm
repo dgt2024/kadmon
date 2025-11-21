@@ -59,7 +59,10 @@ use16
 ; 	get date in cl/bh/bl: 0x23
 ; you're welcome, future me and whoever will read this
 kernel.bootloader:
-	mov ax, 0x0214
+	mov ax, kernel.osend - 0x7C00
+	shr ax, 9
+	inc al
+	mov ah, 0x02
 	mov cx, 1
 	mov dl, 0x80
 	; this 0x80 means the disk 1, a.k.a. A:/
@@ -95,57 +98,10 @@ kernel.main:
 	; debug code: prints to shell
 	call kernel.message
 	; here begginning code begins :)
-	mov ecx, 0xB7000
+	mov ecx, 0xC0000
 	mov edi, 0xFD180000
-logo:
 	mov al, 0x03
-	stosb
-	loop logo
-	mov ecx, 0x9000
-	mov al, 0x07
 	rep stosb
-	xor dx, dx
-	mov ds, dx
-	mov es, dx
-	mov esi, logo.init
-	mov ecx, logo.end - logo.init
-	shr ecx, 1
-	xor eax, eax
-logo.render:
-	lodsw ; mov ax, word [ds:esi]
-	mov edi, 0xFD238806 ; top left
-	add edi, eax
-	mov al, 0
-	stosb ; mov word [es:edi], ax
-	loop logo.render
-	; squareloop
-	mov ecx, 34
-	mov edi, 0xFD237401
-	mov al, 0x0F
-	rep stosb
-	mov ecx, 34
-	mov edi, 0xFD237801
-	mov al, 0x0F
-	rep stosb
-	mov ecx, 34
-	mov edi, 0xFD23F401
-	mov al, 0x08
-	rep stosb
-	mov ecx, 34
-	mov edi, 0xFD23F801
-	mov al, 0x08
-	rep stosb
-	mov ecx, 30
-	mov edi, 0xFD237C01
-logo.render.border:
-	stosw
-	add edi, 0x1E
-	mov al, 0x0F
-	stosw
-	add edi, 0x3DE
-	loop logo.render.border
-	; code to add this is end
-	; debugging .raw
 	call desktop
 	; todo read desktop
 	; now mousecursor
@@ -153,27 +109,326 @@ logo.render.border:
 	mov esi, shell
 	call kernel.load
 kernel.loop:
-	in al, 0x64
-	test al, 0x01
-	jz kernel.loop.return
-	test al, 0x20
-	jz keyboard
-	call mouse
-kernel.loop.return:
-	mov byte[0x600], 0
-	mov byte[0x700], 0
+	sti
 	call kernel.run
 	jmp kernel.loop
-mouse:
+kernel.run: ; schedulers
+	mov esi, 0x2000
+kernel.run.loop:
+	lodsb
+	mov byte[0x1000], al
+	cmp al, 0
+	je kernel.run.end
+	push esi
+	push eax
+	shl al, 1
+	movzx eax, al
+	mov esi, 0x600000
+	add esi, eax
+	shl eax, 23
+	mov ebx, 0x1000000
+	add ebx, eax
+	add ebx, 32
 	xor eax, eax
-	mov ebx, eax
+	lodsw
+	pop edx
+	pop esi
+	movzx edx, dl
+	shl edx, 16
+	add eax, edx
+	add eax, 0x200000
+	pushad
+	mov dword[0x900], esp
+	mov esp, ebx
+	mov dword[0x904], eax
+	popad
+	call dword[0x904] ; where eax is last address
+	; if it comes here, program ends
+	call kernel.unload ; i gotta close it...
+kernel.run.return:
+	mov esp, dword[0x900]
+	popa
+	call kernel.yield
+	jmp kernel.run.loop
+kernel.run.end:
+	ret
+kernel.load: ; a way to start an app
+	; esi is RAM address, somehow
+	lodsb
+	and al, 3
+	cmp al, 0
+	je kernel.load.byte
+	cmp al, 1
+	je kernel.load.word
+	; unavailable app idk
+	ret
+kernel.load.skip:
 	mov ecx, eax
-	mov edx, eax
-	call mouse.poll
+kernel.load.loop:
+	lodsb
+	cmp al, 0
+	jne kernel.load.loop
+	push esi
+	mov esi, 0x2000
+kernel.load.reg:
+	lodsb
+	cmp al, 0
+	jne kernel.load.reg
+	dec esi
+	lodsb
+	dec esi
+	inc al
+	cmp al, 62
+	jae kernel.load.end
+	mov edi, esi
+	stosb
+	pop esi
+	; al is task #
+	mov edi, 0x200000
+	movzx eax, al
+	shl eax, 16
+	add edi, eax
+	rep movsb
+	ret
+kernel.load.end:
+	pop esi
+	ret
+kernel.load.byte:
+	xor eax, eax
+	lodsb
+	jmp kernel.load.skip
+kernel.load.word:
+	xor eax, eax
+	lodsw
+	jmp kernel.load.skip
+kernel.unload:
+	; close app means:
+	; erase VRAM
+	; deregister from task manager
+	xor eax, eax
+	mov al, byte[0x1000]
+	push eax
+	mov ebx, 0xC
+	mul ebx
+	add eax, 0xFD24
+	mov ebx, eax
+	mov esi, 0x100000
+kernel.unload.search:
+	lodsw
+	cmp ax, 0
+	je kernel.unload.endsrch
+	cmp ax, bx
+	jne kernel.unload.search
+	mov edi, esi
+	sub edi, 2
+kernel.unload.swap:
+	lodsw
+	stosw
+	cmp ax, 0
+	jne kernel.unload.swap
+kernel.unload.endsrch:
+	pop eax
+	push eax
 	mov bl, al
-	test al, 28
-	jz mouse.jump
-	mov eax, dword[0x608]
+	mov esi, 0x2000
+kernel.unload.task:
+	lodsb
+	cmp al, 0
+	je kernel.unload.finish
+	cmp al, bl
+	jne kernel.unload.task
+	mov edi, esi
+	dec edi
+kernel.unload.switch:
+	lodsb
+	stosb
+	cmp al, 0
+	jne kernel.unload.switch
+	pop eax
+	mov edi, 0x200000
+	shl eax, 16
+	add edi, eax
+	mov ecx, 0x4000
+	xor eax, eax
+	rep stosd
+	ret
+kernel.unload.finish:
+	pop eax
+	ret
+	; idt table and gdt table
+kernel:
+	dq 0x0000000000000000
+	dq 0x00CF9A000000FFFF
+	dq 0x00CF92000000FFFF
+kernel.desc:
+	dw kernel.end - kernel - 1
+	dd kernel
+kernel.end:
+	; idt
+; hehehe
+; now an application, that does nothing... yet
+	; time to uhm idk , "I'll make the desktop"
+	; why not tho lol
+	; this is me 5 days later, I regret it
+	; the mouse worked, i didnt back up and it doesnt work anymlre
+	; the mouse had scroll lock... yea, scroll lock I didn't know that existed
+	; it has been one month, i unregret it i might have finished now only one thing left
+	; the floppy disk controller, which is what i hate, has vanished
+	; it has been 2 months and i still haven't made a disk controller
+	; altough i could bc i finished multitasking
+times 510 - ($ - $$) db 0
+dw 0xAA55
+exception.desc:
+	dw exception.desc - exception - 1
+	dd exception
+exception:
+	dw exception.divby0, 0x08 ; some guy divided by 0
+	db 0, 0x8E
+	dw exception.divby0/0x10000
+	dw exception.unused, 0x08
+	db 0, 0x8E
+	dw exception.unused/0x10000
+	dw exception.panic, 0x08 ; memory, CPU, motherboard is damaged
+	db 0, 0x8E
+	dw exception.panic/0x10000
+	dw exception.debug, 0x08
+	db 0, 0x8E
+	dw exception.debug/0x10000
+	dw exception.debug2, 0x08
+	db 0, 0x8E
+	dw exception.debug2/0x10000
+	dw exception.unused, 0x08 ; unused (BOUND)
+	db 0, 0x8E
+	dw exception.unused/0x10000
+	dw exception.invalidopc, 0x08 ; invalid opcode
+	db 0, 0x8E
+	dw exception.invalidopc/0x10000
+	dw exception.nofloat, 0x08 ; lazy FPU/no FPU
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	dw exception.dfault, 0x08 ; double fault
+	db 0, 0x8E
+	dw exception.dfault/0x10000
+	dw exception.nofloat, 0x08 ; legacy FPU
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	dw exception.invalidtask, 0x08 ; invalid task (TSS task selector)
+	db 0, 0x8E
+	dw exception.invalidtask/0x10000
+	dw exception.invalidtask, 0x08 ; non-present-segment
+	db 0, 0x8E
+	dw exception.invalidtask/0x10000
+	dw exception.memoryleak, 0x08
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	dw exception.memoryleak, 0x08; protection violation
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	dw exception.memoryleak, 0x08 ; invalid memory access
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	times 8 db 0 ; reserved
+	dw exception.nofloat, 0x08 ; FPU error
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	dw exception.memoryleak, 0x08 ; unaligned mem access
+	db 0, 0x8E
+	dw exception.memoryleak/0x10000
+	dw exception.panic, 0x08
+	db 0, 0x8E
+	dw exception.panic/0x10000
+	dw exception.nofloat, 0x08
+	db 0, 0x8E
+	dw exception.nofloat/0x10000
+	times 8*12 db 0
+	; IRQ0 0x20
+	dw time, 0x08
+	db 0, 0x8E
+	dw time/0x10000
+	dw keyboard, 0x08
+	db 0, 0x8E
+	dw keyboard/0x10000
+	times 8*10 db 0
+	dw mouse, 0x08
+	db 0, 0x8E ; int 44 / 0x2C?
+	dw mouse/0x10000
+	times 8*3 db 0
+	dw kernel.system, 0x08 ; system call, a.k.a int 0x30 :3 (i think lol)
+	db 0, 0x8E
+	dw kernel.system/0x10000
+; syscalls :3 (data section i could say)
+; todo: fix this to add exceptions plz i dont wanna have eip at indonesia
+; GDT org: limit low - limit high - base low - base high - base middle -  access -
+; flags+limit high(4bits) - base high
+exception.unused:
+	iret
+exception.divby0:
+	mov eax, 0
+	mov edx, 0
+	iret
+exception.panic:
+	cli
+	mov edi, 0xFD000000
+	mov al, 0x07
+	rep stosb
+	mov esi, exception.panic.message
+	mov edi, 0xFD010000
+	mov bl, 0x1E
+	call text
+	hlt
+	iret
+exception.panic.message: db "FATAL ERROR: Your computer is broken", 0
+exception.invalidopc:
+	call kernel.unload
+	iret ; todo message
+exception.nofloat:
+	iret ;  i don't think ill use floats but maybe idk whats an FPU
+exception.dfault:
+	cli
+	mov edi, 0xFD000000
+	mov ecx, 0xC0000
+	mov al, 0x07
+	rep stosb
+	mov esi, exception.dfault.message
+	mov edi, 0xFD010000
+	mov bl, 0x1E
+	call text
+	hlt
+	iret
+exception.dfault.message: db "FATAL ERROR: An error has ocurred, reset your computer", 0
+exception.invalidtask:
+	; todo: using paging, jump to task 0 or open shell
+	iret
+exception.memoryleak:
+	; show memory leak error
+	call kernel.unload
+	iret
+exception.debug:
+	mov dx, 0x3F8
+	mov al, '#'
+	out dx, al
+	iret
+exception.debug2:
+	mov dx, 0x3F8
+	mov al, '$'
+	out dx, al
+	iret
+shell:
+; app.asm
+; file headers
+db 00101000b
+db shell.end - shell.init
+db "shell", 0
+shell.init: ; my first app
+	ret
+shell.end:
+mouse:
+	cli
+	int3
+	pushad
+	in al, 0x60
+	mov byte[0x600], al ; buttons at 0x600
+	mov eax, dword[0x601]
 	mov esi, 0xFD0C0000
 	mov edi, 0xFD000000 
 	add esi, eax
@@ -192,17 +447,11 @@ mouse.replace.skip:
 	add esi, 0x3F4
 	pop ecx
 	loop mouse.replace
-	mov dword[0x600], ebx ; buttons
-	xor eax, eax
-	mov ebx, eax
-	mov ecx, eax
-	mov edx, eax
-	call mouse.poll
+	in al, 0x60
 	mov cl, al
-	call mouse.poll
+	in al, 0x60
 	mov dl, al
-	mov ebx, dword[0x608]
-	mov dword[0x604], ebx
+	mov ebx, dword[0x601]
 	mov eax, ebx
 	movsx ecx, cl ; cl is x delta
 	movsx edx, dl ; dl is -y delta
@@ -211,16 +460,15 @@ mouse.replace.skip:
 	add eax, ecx ; pos = pos+x+y*1024
 	add eax, edx
 	call mouse.clamp
-	mov dword[0x608], eax ; calculated result
+	mov dword[0x601], eax ; calculated result
 	call mouse.print
 mouse.jump:
-	ret
-mouse.poll:
-	in al, 0x64
-	test al, 0x21
-	jz mouse.poll
-	in al, 0x60
-	ret
+	mov al, 0x20
+	out 0xA0, al
+	out 0x20, al
+	popad
+	sti
+	iret
 	; here went mouse position
 	; goes*, went*, goes*, went*, goes*, went*
 	; i decided to put it on stack, copying windows
@@ -250,24 +498,7 @@ mouse.print.loop:
 mouse.print.skip:
 	loop mouse.print.loop
 	ret
-	; time to uhm idk , "I'll make the desktop"
-	; why not tho lol
-	; this is me 5 days later, I regret it
-	; the mouse worked, i didnt back up and it doesnt work anymlre
-	; the mouse had scroll lock... yea, scroll lock I didn't know that existed
-	; it has been one month, i unregret it i might have finished now only one thing left
-	; the floppy disk controller, which is what i hate, has vanished  
-times 510 - ($ - $$) db 0
-dw 0xAA55
-mouse.endofint:
-	push eax
-	mov al, 0x20
-	out 0xA0, al
-	out 0x20, al
-	pop eax
-	ret
 mouse.clamp:
-	call mouse.endofint
 	; ebx is old
 	; ecx is X
 	add ebx, 0x400
@@ -328,40 +559,81 @@ mouse.print.bounds:
 	mov edi, 0xFD0C0000
 	ret
 keyboard:
-	mov ebx, 0x600
-	mov ecx, 0x700
-	mov ah, 0
-keyboard.loop:
+	cli
+	pushad
 	in al, 0x64
-	test al, 0x01
-	jz keyboard.end
 	test al, 0x20
 	jnz keyboard.end
+	mov al, byte[0x700]
+	cmp al, ':'
+	je keyboard.special
 	in al, 0x60
-	cmp ah, al
-	je keyboard.loop
-	mov ah, al
-	mov edi, ebx
-	stosb
-	mov ebx, edi
+	mov byte[0x700], al
+keyboard.return:
 	mov esi, keyboard.ascii
-	push eax
 	movzx eax, al
 	add esi, eax
-	pop eax
-	mov edi, ecx
-	movsb
-	mov ecx, edi
-	jmp keyboard.loop
+	cmp al, 0x48
+	ja keyboard.end
+	lodsb
+	mov byte[0x800], al
 keyboard.end:
-    mov edi, ebx
-    mov al, 0
-    stosb
-    mov edi, ecx
-    stosb
-    mov al, 0x20
-    out 0x20, al
-	jmp kernel.loop.return
+	mov al, 0x20
+	out 0x20, al
+	popad
+	sti
+	iret
+keyboard.special:
+	in al, 0x60
+	mov byte[0x701], al
+	cmp al, 0xBA
+	je keyboard.capslock
+	jmp keyboard.return
+keyboard.capslock:
+	mov al, 0x04
+	out 0x60, al
+	jmp keyboard.return
+keyboard.ascii:
+	db 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0
+	db ' ', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']'
+	db ' ', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'", 0
+	db 0, '\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/'
+	db 0, 0, 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '7', '8', '9'
+	db '-', '4', '5', '6', '+', '1', '2', '3', '0', '.', 0, 0, '/', 0, 0
+time:
+	cli
+	push eax
+	push edx
+	mov al, byte[0x1000]
+	cmp al, 0
+	je time.end
+	shl al, 1
+	movzx eax, al
+	mov edi, 0x600000
+	add edi, eax
+	shl eax, 23
+	mov ebx, 0x1000000
+	add ebx, eax
+	mov eax, dword[esp+8]
+	stosw
+	pop edi
+	pop eax
+	mov esp, ebx
+	mov ebx, dword[0x904]
+	pushad
+	mov al, 0x20
+	out 0x20, al
+	sti
+	mov esp, dword[0x900]
+	popad
+	jmp kernel.run.loop
+time.end:
+	pop eax
+	pop edi
+	mov al, 0x20
+	out 0x20, al
+	sti
+	iret
 desktop:
 	mov esi, desktop.files
 	mov edi, 0xFD18080A
@@ -390,6 +662,7 @@ desktop.proc:
 	pop edi
 	add edi, 0x67FB
 	mov bl, 0x0F
+	call text
 	call text
 desktop.proc.skip:
 	ret
@@ -424,6 +697,8 @@ desktop.update.end:
 desktop.update.space:
 	inc edi
 	jmp desktop.update.skip
+desktop.files: 
+	db 00111000b, 0x00, "f.lm", 0 ; a file!, such surprise
 icon:
 	cmp al, 0
 	je icon.print.raw
@@ -617,79 +892,38 @@ text.int.return:
 text.int.hex:
 	add al, 7
 	jmp text.int.return
-time.wait:
-	; wait ecx of 1/10000 of a second
-time.wait.ms:
-	mov al, 0x30
-	out 0x43, al
-	mov ax, 1193
-	out 0x40, al
-	mov al, ah
-	out 0x40, al
-time.wait.loop:
-	in al, 0x61
-	test al, 0x20
-	jz time.wait.loop
-	loop time.wait.ms
-	ret
-time.time:
-	; cl:bh:bl
-	mov al, 0
-	call time.poll
-	mov bl, al
-	mov al, 2
-	call time.poll
-	mov bh, al
-	mov al, 4
-	call time.poll
-	mov cl, al
-	ret
-time.date:
-	; cl/bh/bl - DD/MM/YY
-	mov al, 7
-	call time.poll
-	mov cl, al
-	mov al, 8
-	call time.poll
-	mov bh, al
-	mov al, 9
-	call time.poll
-	mov bl, al
-	ret
-time.poll:
-	mov dx, 0x70
-	out dx, al
-	inc dx
-	in al, dx
-	mov ah, al
-	shr ah, 4
-	and al, 0x0F
-	push eax
-	and eax, 0x0000FF00
-	shr eax, 8
-	mov dh, al
-	pop eax
-	mov ah, dh
-	add al, ah
-	ret
 ; mostly kernel stuff
+kernel.yield:
+	cli
+	push eax
+	push edi
+	mov dword[0x904], ebx
+	mov al, byte[0x1000]
+	cmp al, 0
+	je kernel.yield.end
+	shl al, 1
+	movzx eax, al
+	mov edi, 0x600000
+	add edi, eax
+	shl eax, 23
+	mov ebx, 0x1000000
+	add ebx, eax
+	mov eax, dword[esp+12]
+	stosw
+	pop edi
+	pop eax
+	mov esp, ebx
+	mov ebx, dword[0x904]
+	pushad
+	mov esp, dword[0x900]
+	popad
+	jmp kernel.run.loop
+kernel.yield.end:
+	pop eax
+	pop edi
+	iret
 kernel.drivers:
-	mov al, 0xA8
-	out 0x64, al
-	mov al, 0x20
-	out 0x64, al
-	in al, 0x60
-	and al, 0xDF
-	or al, 0x02
-	mov ah, al
-	mov al, 0x60
-	out 0x64, al
-	mov al, ah
-	out 0x60, al
-	mov al, 0xD4
-	out 0x64, al
-	mov al, 0xF4
-	out 0x60, al
+	cli
 	mov al, 0x11
 	out 0x20, al
 	out 0xA0, al
@@ -704,121 +938,152 @@ kernel.drivers:
 	mov al, 0x01
 	out 0x21, al
 	out 0xA1, al
-	mov al, 0x0
-	out 0x21, al
-	out 0xA1, al
-	ret
-kernel.memory:
-	xor eax, eax
-	mov al, byte[0x1000]
-	mov esi, eax
-	shl esi, 26
-	add esi, 1
-	ret
-kernel.run: ; schedulers
-	mov esi, 0x2000
-kernel.run.loop:
-	lodsb
-	cmp al, 0
-	je kernel.run.end
-	push esi
-	push eax
-	shl al, 1
-	movzx eax, al
-	mov esi, 0x600000
-	add esi, eax
-	shl eax, 23
-	mov ebx, 0x1000000
-	add ebx, eax
-	xor eax, eax
-	lodsw
-	pop edx
-	pop esi
-	movzx edx, dl
-	shl edx, 16
-	add eax, edx
-	add eax, 0x200000
-	pusha
-	call kernel.run.pit ; waits uhm idk
-	mov dword[0x900], esp
-	mov esp, ebx
-	call eax ; where eax is last address
-	; if it comes here, program ends
-	call kernel.unload ; i gotta close it...
-kernel.run.return:
-	hlt
-	mov esp, dword[0x900]
-	popa
-	jmp kernel.run.loop
-kernel.run.end:
-	ret
-kernel.run.pit:
-	push eax
-	in al, 0x21
-	and al, 0xFE
-	out 0x21, al
-	sti
+	; timer IRQ0 - int 0x20
 	mov al, 0x34
 	out 0x43, al
 	mov ax, 1193
 	out 0x40, al
 	mov al, ah
 	out 0x40, al
+	; keyboard IRQ1 - int 0x21
+kernel.drivers.keyboard:
+	in al, 0x64
+	test al, 2
+	jnz kernel.drivers.keyboard
+	mov al, 0xF4
+	out 0x60, al
+	; mouse IRQ12 - int 0x2C
+kernel.drivers.mouse:
+	call kernel.drivers.clear
+	mov al, 0xA7
+	out 0x64, al
+	call kernel.drivers.clear
+	mov al, 0xA8
+	out 0x64, al
+	call kernel.drivers.clear
+	mov al, 0x20
+	out 0x64, al
+	call kernel.drivers.wait
+	in al, 0x60
+	test al, 0x20
+	jnz kernel.drivers.mouse
+	and al, 0xDF
+	or al, 0x02
+	push eax
+	call kernel.drivers.clear
+	mov al, 0x60
+	out 0x64, al
+	call kernel.drivers.clear
 	pop eax
+	out 0x60, al
+kernel.drivers.send:
+	call kernel.drivers.clear
+	mov al, 0xD4
+	out 0x64, al
+	call kernel.drivers.clear
+	mov al, 0xFF
+	out 0x60, al
+	call kernel.drivers.wait
+	in al, 0x60
+	mov bh, al
+	call kernel.drivers.wait
+	in al, 0x60
+	mov bl, al
+	call kernel.drivers.wait
+	in al, 0x60
+	mov cl, al
+	call kernel.drivers.clear
+	mov al, 0xD4
+	out 0x64, al
+	call kernel.drivers.clear
+	mov al, 0xF4
+	out 0x60, al
+	call kernel.drivers.wait
+	in al, 0x60
+	cmp al, 0xFE
+	je kernel.drivers.send
+	; unmask
+	in al, 0x21
+	and al, 11111000b
+	out 0x21, al
+	in al, 0xA1
+	and al, 11101111b
+	out 0xA1, al
+	mov dword[0x601], 0x60200
+	sti
+	ret
+kernel.drivers.clear:
+	in al, 0x64
+	test al, 2
+	jnz kernel.drivers.clear
+	ret
+kernel.drivers.wait:
+	in al, 0x64
+	test al, 1
+	jz kernel.drivers.wait
+	ret
+kernel.system:
+	cli
+	pusha
+	cmp cl, 0x00
+	je kernel.system.kernel0
+	cmp cl, 0x01
+	je kernel.system.kernel1
+	cmp cl, 0x02
+	je kernel.system.kernel2
+	cmp cl, 0x10
+	je kernel.system.display0
+	cmp cl, 0x11
+	je kernel.system.display1
+	cmp cl, 0x12
+	je kernel.system.display2
+	cmp cl, 0x13
+	je kernel.system.display3
+	cmp cl, 0x14
+	je kernel.system.display4
+	cmp cl, 0x15
+	je kernel.system.display5
+kernel.system.return:
+	popa
+	sti
+	jmp kernel.yield
+kernel.system.kernel0:
+	popa
+	call kernel.spawn
+	sti
+	jmp kernel.yield
+kernel.system.kernel1:
+	popa
+	call kernel.memory
+	sti
+	jmp kernel.yield
+kernel.system.kernel2:
+	call kernel.unload
+	jmp kernel.system.return
+kernel.system.display0:
+	call desktop.update
+	jmp kernel.system.return
+kernel.system.display1:
+	call text
+	jmp kernel.system.return
+kernel.system.display2:
+	call text.char
+	jmp kernel.system.return
+kernel.system.display3:
+	call text.nibble
+	jmp kernel.system.return
+kernel.system.display4:
+	call icon
+	jmp kernel.system.return
+kernel.system.display5:
+	call icon.print
+	jmp kernel.system.return
 ; task management - preemptive
 ; i had to do this twice :(
-kernel.load: ; a way to start an app
-	; esi is RAM address, somehow
-	lodsb
-	and al, 3
-	cmp al, 0
-	je kernel.load.byte
-	cmp al, 1
-	je kernel.load.word
-	; unavailable app idk
-	ret
-kernel.load.skip:
-	mov ecx, eax
-kernel.load.loop:
-	lodsb
-	cmp al, 0
-	jne kernel.load.loop
-	push esi
-	mov esi, 0x2000
-kernel.load.reg:
-	lodsb
-	cmp al, 0
-	jne kernel.load.reg
-	dec esi
-	mov edi, esi
-	inc al
-	cmp al, 62
-	je kernel.load.end
-	stosb
-	pop esi
-	; al is task #
-	mov edi, 0x200000
-	movzx eax, al
-	shl eax, 16
-	add edi, eax
-	rep movsb
-	ret
-kernel.load.end:
-	pop esi
-	ret
-kernel.load.byte:
-	xor eax, eax
-	lodsb
-	jmp kernel.load.skip
-kernel.load.word:
-	xor eax, eax
-	lodsw
-	jmp kernel.load.skip
-kernel.unload:
-	ret
 kernel.spawn:
 	xor ebx, ebx
 	mov bl, byte[0x1000]
+	dec bl
 kernel.spawn.return:
 	mov esi, 0x100000
 	mov eax, 0xC ; 0 :)
@@ -843,220 +1108,25 @@ kernel.spawn.end:
 	shl eax, 16
 	mov edi, eax
 	ret
+kernel.memory:
+	xor eax, eax
+	mov al, byte[0x1000]
+	mov esi, eax
+	shl esi, 26
+	add esi, 1
+	ret
 kernel.message:
 	mov esi, kernel.string
-	mov edi, 0xFD000801
+	mov edi, 0xFD0601BD
 	mov bl, 0x1E
-	call text
-	mov ecx, 50000
-	call time.wait
+	mov cl, 0x11
+	int 0x30
 	ret
 kernel.string: db "Booting Kasmon OS a0.1", 0 ; boot message
 ; this code down to the textures is uhh idk it was on the bottom
 ; every line makes this whole thing and is probably my only source
 ; of motivation, right now it has 1500 lines, exactly which makes me happy
-; syscalls :3 (data section i could say)
-; todo: fix this to add exceptions plz i dont wanna have eip at indonesia
-; GDT org: limit low - limit high - base low - base high - base middle -  access -
-; flags+limit high(4bits) - base high
-kernel:
-	dq 0x0000000000000000
-	dq 0x00CF9A000000FFFF
-	dq 0x00CF92000000FFFF
-kernel.desc:
-	dw kernel.end - kernel - 1
-	dd kernel
-kernel.end:
-exception:
-	dw exception.divby0, 0x08 ; some guy divided by 0
-	db 0, 0x8E
-	dw exception.divby0/0x10000
-	dw exception.unused, 0x08
-	db 0, 0x8E
-	dw exception.unused/0x10000
-	dw exception.panic, 0x08 ; memory, CPU, motherboard is damaged
-	db 0, 0x8E
-	dw exception.panic/0x10000
-	dw exception.debug, 0x08
-	db 0, 0x8E
-	dw exception.debug/0x10000
-	dw exception.unused, 0x08
-	db 0, 0x8E
-	dw exception.unused/0x10000
-	dw exception.unused, 0x08 ; unused (BOUND)
-	db 0, 0x8E
-	dw exception.unused/0x1000
-	dw exception.invalidopc, 0x08 ; invalid opcode
-	db 0, 0x8E
-	dw exception.invalidopc/0x10000
-	dw exception.nofloat, 0x08 ; lazy FPU/no FPU
-	db 0, 0x8E
-	dw exception.nofloat/0x10000
-	dw exception.dfault, 0x08 ; double fault
-	db 0, 0x8E
-	dw exception.dfault/0x10000
-	dw exception.nofloat, 0x08 ; legacy FPU
-	db 0, 0x8E
-	dw exception.nofloat/0x10000
-	dw exception.invalidtask, 0x08 ; invalid task (TSS task selector)
-	db 0, 0x8E
-	dw exception.invalidtask/0x10000
-	dw exception.invalidtask, 0x08 ; non-present-segment
-	db 0, 0x8E
-	dw exception.invalidtask/0x10000
-	dw exception.memoryleak, 0x08
-	db 0, 0x8E
-	dw exception.memoryleak/0x10000
-	dw exception.memoryleak, 0x08; protection violation
-	db 0, 0x8E
-	dw exception.memoryleak/0x10000
-	dw exception.memoryleak, 0x08 ; invalid memory access
-	db 0, 0x8E
-	dw exception.memoryleak/0x10000
-	times 8 db 0 ; reserved
-	dw exception.nofloat, 0x08 ; FPU error
-	db 0, 0x8E
-	dw exception.nofloat/0x10000
-	dw exception.memoryleak, 0x08 ; unaligned mem access
-	db 0, 0x8E
-	dw exception.memoryleak/0x10000
-	dw exception.panic, 0x08
-	db 0, 0x8E
-	dw exception.panic/0x10000
-	dw exception.nofloat, 0x08
-	db 0, 0x8E
-	dw exception.nofloat/0x10000
-	times 88 db 0
-	dw kernel.system, 0x08 ; system call, a.k.a int 0x21 :3 (i think lol)
-	db 0, 0x8E
-	dw kernel.system/0x10000
-exception.desc:
-	dw exception.desc - exception - 1
-	dd exception
-exception.unused:
-	iret
-exception.divby0:
-	mov eax, 0
-	mov edx, 0
-	iret
-exception.panic:
-	mov edi, 0xFD000000
-	mov al, 0x07
-	rep stosb
-	mov esi, exception.panic.message
-	mov edi, 0xFD010000
-	mov bl, 0x1E
-	call text
-	hlt
-	iret
-exception.panic.message: db "FATAL ERROR: Your computer is broken", 0
-exception.invalidopc:
-	call kernel.unload
-	iret ; todo message
-exception.nofloat:
-	iret ;  i don't think ill use floats but maybe idk whats an FPU
-exception.dfault:
-	mov edi, 0xFD000000
-	mov ecx, 0xC0000
-	mov al, 0x07
-	rep stosb
-	mov esi, exception.dfault.message
-	mov edi, 0xFD010000
-	mov bl, 0x1E
-	call text
-	hlt
-	iret
-exception.dfault.message: db "FATAL ERROR: An error has ocurred, reset your computer", 0
-exception.invalidtask:
-	; todo: using paging, jump to task 0 or open shell
-	iret
-exception.memoryleak:
-	; show memory leak error
-	call kernel.unload
-	iret
-exception.pitinterrupt:
-	mov eax, dword[esp]
-	mov bl, byte[0x1000]
-	shl bl, 1
-	movzx ebx, bl
-	mov edi, 0x600000
-	add edi, ebx
-	stosw
-	jmp kernel.run.return
-exception.debug:
-	mov dx, 0x3F8
-	mov al, '#'
-	out dx, al
-	iret
-kernel.system:
-	pusha
-	cmp cl, 0x00
-	je kernel.system.kernel0
-	cmp cl, 0x01
-	je kernel.system.kernel1
-	cmp cl, 0x02
-	je kernel.system.kernel2
-	cmp cl, 0x10
-	je kernel.system.display0
-	cmp cl, 0x11
-	je kernel.system.display1
-	cmp cl, 0x12
-	je kernel.system.display2
-	cmp cl, 0x13
-	je kernel.system.display3
-	cmp cl, 0x14
-	je kernel.system.display4
-	cmp cl, 0x15
-	je kernel.system.display5
-	cmp cl, 0x20
-	je kernel.system.peripheral0
-	cmp cl, 0x21
-	je kernel.system.peripheral1
-	cmp cl, 0x22
-	je kernel.system.peripheral2
-kernel.system.return:
-	popa
-	iret
-kernel.system.kernel0:
-	popa
-	call kernel.spawn
-	iret
-kernel.system.kernel1:
-	popa
-	call kernel.memory
-	iret
-kernel.system.kernel2:
-	call kernel.unload
-	jmp kernel.system.return
-kernel.system.display0:
-	call desktop.update
-	jmp kernel.system.return
-kernel.system.display1:
-	call text
-	jmp kernel.system.return
-kernel.system.display2:
-	call text.char
-	jmp kernel.system.return
-kernel.system.display3:
-	call text.nibble
-	jmp kernel.system.return
-kernel.system.display4:
-	call icon
-	jmp kernel.system.return
-kernel.system.display5:
-	call icon.print
-	jmp kernel.system.return
-kernel.system.peripheral0:
-	call time.wait
-	jmp kernel.system.return
-kernel.system.peripheral1:
-	popa
-	call time.time
-	iret
-kernel.system.peripheral2:
-	popa
-	call time.date
-	iret
+	
 ; here's finally where the files are :)
 ; Hard-coded folder's I've made:
 ; file system:
@@ -1065,31 +1135,6 @@ kernel.system.peripheral2:
 	; b2:size (accordingly)
 	; bN: name
 	; bM: 0x00
-desktop.files: 
-	db 00111000b, 0x00, "f.lm", 0 ; a file!, such surprise
-; hehehe
-
-
-; now an application, that does nothing... yet
-shell:
-; app.asm
-; file headers
-db 00101100b
-db shell.end - shell.init
-db "shell", 0
-shell.init:
-	shell.loop:
-		jmp shell.loop
-shell.end:
-
-
-keyboard.ascii:
-	db 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0
-	db ' ', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']'
-	db 0x20, 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\', 0
-	db 0, 0, 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', 0
-	db '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '7', '8', '9'
-	db '-', '4', '5', '6', '+', '1', '2', '3', '0', '.', 0, 0, '\', 0, 0
 ; this comment below chose the structure of this whole proyect
 ; from here until whenever i want, textures
 logo.init: ; 1-color version of an .img
@@ -1833,62 +1878,7 @@ text.database: ;  a bunch of bitmaps, a.k.a. .bmp files
 	; btw i didn't include non-printable characters
 	; if u try to print them, nothing prints
 ; i got well damn tired of scrolling 500 lines to get to this down here so welp
-debug.init:
-	push esi
-	push eax
-	mov esi, debug.init.str
-	call debug.cstr
-	pop eax
-	pop esi
-	ret
-debug.init.str: db "KDSS - a0.1: ", 0
-debug.cstr:
-	; esi string :D
-debug.cstr.loop:
-	lodsb
-	cmp al, 0
-	je debug.cstr.exit
-	call debug.log
-	jmp debug.cstr.loop
-debug.cstr.exit:
-	ret
-debug.log:
-	push edx
-	; 4-char string in eax
-	mov ecx, 4
-debug.log.loop:
-	call debug.init
-	mov dx, 0x3F8
-	out dx, al
-	rol eax, 4
-	loop debug.log.loop
-	pop edx
-	ret
-debug.test:
-	call debug.init
-	mov edi, debug.test.str
-	mov ecx, 8
-debug.test.loop:
-	rol eax, 4
-	mov dl, al
-	and dl, 0x0F
-	cmp dl, 9
-	jbe debug.test.digit
-	add dl, 'A'-10
-	jmp debug.test.store
-debug.test.digit:
-	add dl, '0'
-debug.test.store:
-	mov byte[edi], dl
-	inc edi
-	loop debug.test.loop
-	mov esi, debug.test.str
-	call debug.cstr
-	ret
-debug.test.str: db "00000000", 10, 0
-debug.stop:
-	hlt
-times 512 * 0xE - ($ - $$) db 0 ; just to know if I surpass limit to add another secto
+; just so y'all know, i used to calculate the amount of sectors so thats why this comments are here
 ; 5 sectors already probably more, just FOURTEEN MORE ICONS (if you ask, this is only 1)
 ; 6 sectors, and I have 2 proyects, this is B, but i changed the name on this one, i guess this is the real
 ; 9 sectors, pretty unnoticeable to the eye :) maybe 5 kB
@@ -1902,3 +1892,4 @@ times 512 * 0xE - ($ - $$) db 0 ; just to know if I surpass limit to add another
 ; i decided 10kB is too much so I just made the code smaller than
 ; its now 1540 lines and 6kB, 4kb differemce
 ; it jumped back up to 1900 :D at least i'm not cheating lol, bc i just made the keyboard handler, 6.6kB too
+kernel.osend:
